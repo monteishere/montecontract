@@ -1,0 +1,15 @@
+metric,value
+total_signals,11
+buy_signals,4
+sell_signals,7
+avg_rsi_at_buy,57.108
+avg_rsi_at_sell,43.9942
+signals_above_bb_upper,0
+signals_below_bb_lower,0
+avg_adx_at_signal,13.4816
+first_signal_date,2024-04-12
+last_signal_date,2024-12-05
+avg_atr_at_signal,3.5786
+max_histogram,1.2049
+min_histogram,-1.3869
+days_between_signals,16.9

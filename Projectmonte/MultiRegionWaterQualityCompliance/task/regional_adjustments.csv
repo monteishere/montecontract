@@ -1,0 +1,11 @@
+region,quarter,population_factor,environmental_sensitivity,adjustment_factor
+NORTH,1,1.14,0.741,1.15
+NORTH,2,0.804,1.305,1.2
+SOUTH,1,1.148,1.889,0.9
+SOUTH,2,0.826,0.723,0.95
+EAST,1,0.938,1.321,1.05
+EAST,2,0.999,0.809,1.1
+WEST,1,1.16,0.561,1.25
+WEST,2,1.483,1.792,
+CENTRAL,1,0.99,1.004,1.0
+CENTRAL,2,0.972,1.893,1.05

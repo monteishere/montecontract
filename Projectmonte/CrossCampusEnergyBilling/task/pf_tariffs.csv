@@ -1,0 +1,5 @@
+utility_zone,min_pf,penalty_pct_per_point,bonus_pct_per_point_above_95
+ZA,0.9,1.5,0.8
+ZB,0.88,1.75,0.9
+ZC,0.9,1.4,0.75
+ZD,0.85,2.0,1.0

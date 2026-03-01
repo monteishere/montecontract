@@ -1,0 +1,13 @@
+metric,value
+total_anomalies,80
+total_affected_value,4186069.5
+affected_symbols,"AAPL,AMZN,GOOGL,META,MSFT"
+count_DUPLICATE_TRADE,8
+count_POSITION_MISMATCH,11
+count_PRICE_DEVIATION,13
+count_SAME_DAY_REVERSAL,6
+count_TIMING_VIOLATION,13
+count_UNMATCHED_TRADE,29
+severity_HIGH,12
+severity_MEDIUM,22
+severity_LOW,46

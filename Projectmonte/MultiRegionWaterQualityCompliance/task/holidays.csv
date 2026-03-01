@@ -1,0 +1,12 @@
+region,date,holiday_name
+ALL,2024-01-01,New Year
+ALL,2024-01-15,MLK Day
+ALL,2024-02-19,Presidents Day
+ALL,2024-05-27,Memorial Day
+NORTH,2024-03-15,Regional Holiday North
+SOUTH,2024-04-10,Regional Holiday South
+EAST,2024-02-28,Regional Holiday East
+WEST,2024-06-05,Regional Holiday West
+CENTRAL,2024-03-20,Regional Holiday Central
+ALL,2024-03-29,Good Friday
+ALL,2024-04-01,Easter Monday
