@@ -57,10 +57,6 @@ def check_column_values(merged, col, tol=0.01):
     return matches / total if total > 0 else 0
 
 
-# ============================================================
-#  job_metrics.csv checks (1-12)
-# ============================================================
-
 def check_jm_exists(sub, golden):
     assert sub is not None, "job_metrics.csv not found"
 
@@ -152,10 +148,6 @@ def check_jm_penalty_weight_zeroes(sub, golden):
     assert len(bad) == 0, f"{len(bad)} non-breached jobs have non-zero penalty_weight"
 
 
-# ============================================================
-#  tenant_monthly.csv checks (13-24)
-# ============================================================
-
 def check_tm_exists(sub, golden):
     assert sub is not None, "tenant_monthly.csv not found"
 
@@ -241,10 +233,6 @@ def check_tm_risk_score_range(sub, golden):
     assert len(bad) == 0, f"{len(bad)} rows have risk_score outside [0,100]"
 
 
-# ============================================================
-#  pool_monthly.csv checks (25-34)
-# ============================================================
-
 def check_pm_exists(sub, golden):
     assert sub is not None, "pool_monthly.csv not found"
 
@@ -303,10 +291,6 @@ def check_pm_reject_count(sub, golden):
     assert acc >= 0.90, f"reject_count accuracy {acc:.2%} < 90%"
 
 
-# ============================================================
-#  retry_effectiveness.csv checks (35-43)
-# ============================================================
-
 def check_re_exists(sub, golden):
     assert sub is not None, "retry_effectiveness.csv not found"
 
@@ -360,10 +344,6 @@ def check_re_avg_expected_delay(sub, golden):
     assert acc >= 0.85, f"avg_expected_delay accuracy {acc:.2%} < 85%"
 
 
-# ============================================================
-#  incident_impact.csv checks (44-51)
-# ============================================================
-
 def check_ii_exists(sub, golden):
     assert sub is not None, "incident_impact.csv not found"
 
@@ -416,10 +396,6 @@ def check_ii_affected_tenants(sub, golden):
     acc = check_column_values(merged, "affected_tenants")
     assert acc >= 0.85, f"affected_tenants accuracy {acc:.2%} < 85%"
 
-
-# ============================================================
-#  tenant_profile.csv checks (52-60)
-# ============================================================
 
 def check_tp_exists(sub, golden):
     assert sub is not None, "tenant_profile.csv not found"
@@ -502,10 +478,6 @@ def check_tp_avg_penalty_per_breach(sub, golden):
     assert acc >= 0.85, f"avg_penalty_per_breach accuracy {acc:.2%} < 85%"
 
 
-# ============================================================
-#  Cross-file consistency checks (61-65)
-# ============================================================
-
 def check_cross_penalty_sum(sub_jm, sub_tp, golden_jm, golden_tp):
     if sub_jm is None or sub_tp is None:
         return
@@ -553,10 +525,6 @@ def check_cross_tm_cost_components(sub_tm, golden_tm):
         assert abs(expected - total) < 0.05, \
             f"Cost component mismatch row {idx}: {base}+{retry}+{penalty}={expected} vs {total}"
 
-
-# ============================================================
-#  Test runner
-# ============================================================
 
 CHECKS = [
     ("01_jm_exists", "job_metrics", check_jm_exists),
