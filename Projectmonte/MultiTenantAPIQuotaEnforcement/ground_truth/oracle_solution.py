@@ -486,6 +486,7 @@ def compute_billing_summary(tenant_consumption, violation_ledger, tenants, tier_
 def main():
     base_dir = Path(__file__).parent
     task_dir = base_dir.parent / "task"
+    ground_truth = base_dir
     
     data = load_data(task_dir)
     (api_requests, tenants, tier_policies, endpoints, rate_windows,
@@ -520,6 +521,12 @@ def main():
     )
     billing_summary.to_csv(task_dir / "billing_summary.csv", index=False)
     print(f"billing_summary.csv: {len(billing_summary)} rows")
+    
+    request_attribution.to_csv(ground_truth / "golden_request_attribution.csv", index=False)
+    tenant_consumption.to_csv(ground_truth / "golden_tenant_consumption.csv", index=False)
+    violation_ledger.to_csv(ground_truth / "golden_violation_ledger.csv", index=False)
+    throttle_decisions.to_csv(ground_truth / "golden_throttle_decisions.csv", index=False)
+    billing_summary.to_csv(ground_truth / "golden_billing_summary.csv", index=False)
 
 
 if __name__ == "__main__":
