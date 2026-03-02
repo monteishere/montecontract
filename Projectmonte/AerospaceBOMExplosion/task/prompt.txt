@@ -1,0 +1,36 @@
+You are a manufacturing planner at an aerospace contractor. Given the input files describing assemblies, components, BOM structure, suppliers, inventory, substitutions, supplier pricing, production calendar, and labor rates, produce five output files with specific computations.
+
+INPUT FILES:
+- assemblies.csv: assembly_id, assembly_name, customer, due_date, priority, demand_quantity (top-level product demand)
+- components.csv: component_id, component_name, category, unit, unit_cost, weight_kg, default_supplier, lead_time_days, min_order_qty, is_critical
+- bom_structure.csv: parent_id, child_id, quantity_per, level, scrap_rate, operation_sequence (multi-level BOM with SUB/MOD sub-assemblies)
+- suppliers.csv: supplier_id, supplier_name, country, base_lead_time, reliability_score, payment_terms, min_order_value, shipping_cost_per_kg
+- inventory.csv: component_id, on_hand_qty, allocated_qty, on_order_qty, expected_receipt_date, storage_location
+- substitutions.csv: primary_component, substitute_component, conversion_factor, priority_rank, approval_status
+- supplier_pricing.csv: component_id, supplier_id, min_qty, max_qty, unit_price (tiered pricing)
+- production_calendar.csv: month, working_days, holidays
+- labor_rates.csv: category, labor_rate_per_hour, run_hours_per_unit, overhead_rate
+
+OUTPUT 1: exploded_requirements.csv
+Perform recursive BOM explosion starting from each assembly's demand_quantity. For each parent-child relationship, multiply parent quantity by quantity_per adjusted for scrap_rate (qty * (1 + scrap_rate)). Track through SUB/MOD sub-assemblies recursively until reaching leaf components. Sum total requirements across all demand sources. Output columns: component_id, total_required_qty (rounded to 2 decimals), num_parent_assemblies (distinct assembly sources), deepest_level (max level encountered for this component), category, unit_cost, extended_cost (total_required_qty * unit_cost). Sort by component_id.
+
+OUTPUT 2: material_shortages.csv
+For each component in exploded_requirements, compare total_required_qty against (on_hand_qty - allocated_qty). Calculate gross_shortage = max(0, required - available). Calculate net_shortage = max(0, required - available - on_order_qty). Only include rows where gross_shortage > 0. For substitution analysis: if component has APPROVED substitutes in substitutions.csv, find the highest-priority (lowest priority_rank) substitute. Calculate quantity needed from substitute = shortage * conversion_factor. Check if substitute's available inventory can cover. Output columns: component_id, required_qty, available_qty, on_order_qty, gross_shortage, net_shortage, is_critical, substitute_id, substitute_factor, substitute_available, substitute_can_cover (YES/PARTIAL/NO). Sort by component_id.
+
+OUTPUT 3: purchase_orders.csv
+Group all components with net_shortage > 0 by their default_supplier. For each supplier, aggregate purchase lines. Order quantity = max(net_shortage, min_order_qty). Apply tiered pricing from supplier_pricing.csv based on order quantity. Sum line totals. Check if total_value >= supplier's min_order_value. Output columns: po_number (PO00001 format), supplier_id, num_line_items, total_qty, total_value, max_lead_time_days (max among all lines), meets_minimum (YES/NO), min_order_value. Sort by supplier_id.
+
+OUTPUT 4: critical_path_analysis.csv
+For each assembly, compute total lead time by traversing the BOM tree recursively. For leaf components, use lead_time_days. For sub-assemblies (SUB/MOD), lead time = max(child lead times) + processing time (SUB=5 days, ASM=10 days, other=7 days). Identify which direct child determines the critical path (has max lead time). Buffer = 14 days for CRITICAL priority, 7 days otherwise. Output columns: assembly_id, priority, due_date, total_lead_time_days, num_direct_children, critical_path_child, critical_child_lead_time, buffer_days, required_start_days (total_lead_time + buffer). Sort by assembly_id.
+
+OUTPUT 5: cost_rollup.csv
+Compute bottom-up cost accumulation through the BOM tree. For leaf components: material_cost = unit_cost, labor_cost = labor_rate_per_hour * run_hours_per_unit (from labor_rates by category), overhead_cost = labor_cost * (overhead_rate - 1). For sub-assemblies: material_cost = sum of (child_total_cost * quantity_per * (1 + scrap_rate)), add labor (SUB=25, ASM=75, other=10), add overhead (50% of labor). Multiply unit costs by demand_quantity. Apply 15% margin. Output columns: assembly_id, demand_quantity, unit_material_cost, unit_labor_cost, unit_overhead_cost, unit_total_cost, extended_material, extended_labor, extended_overhead, extended_total, margin_rate, margin_amount, selling_price. Sort by assembly_id.
+
+CRITICAL RULES:
+1. BOM explosion is RECURSIVE - SUB and MOD items have children that must also be exploded
+2. Scrap adjustment multiplies quantity: adj_qty = qty * (1 + scrap_rate); treat null scrap_rate as 0
+3. Components can appear at multiple levels and from multiple assemblies - sum all requirements
+4. Substitution only applies when primary component has shortage AND substitute has APPROVED status
+5. Lead time accumulates UPWARD through BOM tree taking max of children
+6. Cost accumulates UPWARD from leaves, multiplying by adjusted quantities at each level
+7. All monetary values rounded to 2 decimal places

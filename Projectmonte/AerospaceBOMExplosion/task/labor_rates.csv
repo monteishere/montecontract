@@ -1,0 +1,7 @@
+category,labor_rate_per_hour,setup_hours,run_hours_per_unit,overhead_rate
+STRUCTURAL,50.52,2.7,1.86,1.21
+ELECTRICAL,48.84,2.9,1.47,1.62
+HYDRAULIC,31.72,1.5,0.78,1.68
+AVIONICS,38.94,1.2,1.92,1.21
+INTERIOR,74.89,2.9,1.67,1.38
+FASTENER,25.72,3.1,1.68,1.64

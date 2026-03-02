@@ -2,6 +2,29 @@
 
 ## Goal: Create Challenging Tasks
 
+**CRITICAL: DUPLICATE DETECTION IS ACTIVE**
+
+The submission system automatically detects challenges that are structurally similar to existing challenges. If flagged as a potential duplicate, your submission may be rejected. Each challenge must be genuinely unique in:
+
+1. **Domain** - Different industry/context (not just renaming "stations" to "vendors")
+2. **Computation Pattern** - Different algorithmic structure (not just changing coefficient values)
+3. **Data Flow Architecture** - Different relationships between inputs and outputs
+
+**PATTERNS THAT TRIGGER DUPLICATE FLAGS:**
+- Reusing the same "aggregate → rolling stateful score → tiered classification → penalty ledger" flow
+- Same number of inputs/outputs with similar column structures
+- Formulas that are coefficient swaps (0.85/0.15 vs 0.70/0.30)
+- Same null handling patterns with renamed columns
+- Copying your own previous challenge with new domain terminology
+
+**HOW TO AVOID DUPLICATES:**
+- Use fundamentally different computation patterns (graph traversal, simulation, optimization, constraint satisfaction)
+- Change the data flow direction (bottom-up vs top-down aggregation)
+- Use different mathematical foundations (linear algebra vs statistics vs combinatorics)
+- Design outputs that require genuinely different algorithms to produce
+
+---
+
 **CRITICAL: DO NOT USE EXISTING REPOSITORIES OR DOCUMENTED FORMULAS**
 
 AI models like Claude Opus 4.5 have been trained on virtually every public repository, technical indicator library, financial formula, and standard algorithm. If a formula has a Wikipedia page, a library implementation, or exists in any public codebase - AI knows it perfectly and will pass 100%.
