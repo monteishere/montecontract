@@ -1,1 +1,2 @@
 is this true, if valid and not a minor fix,if its a minor dont fix but dont over specify anything or list anything explicitly the solver is meant to come up with his own way to solve it... make it fair not easy 
+
