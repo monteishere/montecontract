@@ -1,1 +1,1 @@
-language:python stars:<=1000 pushed:>2025-05-05 license:mit archived:false topic:finance
+language:python stars:<=1000 pushed:>2025-05-05 license:mit archived:false topic:statistic

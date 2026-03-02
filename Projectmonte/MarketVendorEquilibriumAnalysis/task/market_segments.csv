@@ -1,0 +1,5 @@
+segment,min_vendor_count,concentration_threshold,entropy_floor,vci_ceiling,staleness_alpha,staleness_beta,staleness_gamma,health_decay_rate
+ELECTRONICS,4,0.38,1.319,2.179,0.4,0.35,0.25,0.904
+APPAREL,5,0.33,1.818,2.671,0.4,0.35,0.25,0.926
+HOME_GOODS,3,0.4,1.862,2.91,0.4,0.35,0.25,0.942
+GROCERY,5,0.47,1.909,2.619,0.4,0.35,0.25,0.915
