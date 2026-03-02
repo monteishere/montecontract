@@ -1,0 +1,6 @@
+tier_id,daily_request_limit,hourly_request_limit,daily_token_limit,burst_multiplier,base_monthly_price,priority_level,overage_rate_per_1k_requests,overage_rate_per_1k_tokens,grace_period_minutes,throttle_behavior
+FREE,1000,100,10000,1.0,0.0,0,0.0,0.0,0,HARD_BLOCK
+STARTER,5000,500,50000,1.0,9.99,1,0.5,0.002,5,SOFT_THROTTLE
+PROFESSIONAL,25000,2500,250000,1.2,49.99,2,0.3,0.0015,15,SOFT_THROTTLE
+BUSINESS,100000,10000,1000000,1.5,199.99,3,0.2,0.001,30,SOFT_THROTTLE
+ENTERPRISE,500000,50000,5000000,1.5,999.99,4,0.1,0.0005,60,SOFT_THROTTLE
