@@ -335,10 +335,7 @@ def main():
     
     verify_cross_file_consistency(student_exploded, student_shortages, student_po, student_cost)
     
-    print("\n" + "=" * 50)
-    print(f"TOTAL: {PASS} passed, {FAIL} failed")
-    print(f"SCORE: {PASS}/{PASS+FAIL}")
-    print("=" * 50)
+    print(f"{PASS}/{PASS+FAIL}")
     
     return 0 if FAIL == 0 else 1
 
