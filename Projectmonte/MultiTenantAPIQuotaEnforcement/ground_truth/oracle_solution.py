@@ -68,7 +68,7 @@ def compute_request_attribution(api_requests, tenants, tier_policies, endpoints,
     tenant_tier_map = dict(zip(tenants["tenant_id"], tenants["tier_id"]))
     
     rows = []
-    api_requests_sorted = api_requests.sort_values("timestamp").reset_index(drop=True)
+    api_requests_sorted = api_requests.sort_values(["timestamp", "request_id"]).reset_index(drop=True)
     
     running_hourly = defaultdict(lambda: {"count": 0, "window_start": None})
     running_daily = defaultdict(lambda: {"count": 0, "tokens": 0, "date": None})
@@ -327,7 +327,7 @@ def compute_violation_ledger(request_attribution, tenant_consumption, historical
     
     df = pd.DataFrame(rows)
     if len(df) > 0:
-        df = df.sort_values(["tenant_id", "violation_timestamp"]).reset_index(drop=True)
+        df = df.sort_values(["tenant_id", "violation_timestamp", "request_id"]).reset_index(drop=True)
     return df
 
 
@@ -402,7 +402,7 @@ def compute_throttle_decisions(request_attribution, tenants, tier_policies):
     
     df = pd.DataFrame(rows)
     if len(df) > 0:
-        df = df.sort_values(["tenant_id", "timestamp"]).reset_index(drop=True)
+        df = df.sort_values(["tenant_id", "timestamp", "request_id"]).reset_index(drop=True)
     return df
 
 
