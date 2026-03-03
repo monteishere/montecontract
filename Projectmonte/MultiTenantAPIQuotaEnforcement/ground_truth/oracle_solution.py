@@ -1,8 +1,27 @@
 import pandas as pd
 import numpy as np
+import csv
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta
+
+
+def save_csv(df, path):
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f, lineterminator='\n')
+        writer.writerow(df.columns.tolist())
+        for _, row in df.iterrows():
+            formatted = []
+            for v in row:
+                if pd.isna(v):
+                    formatted.append('')
+                elif isinstance(v, (int, np.integer)):
+                    formatted.append(str(int(v)))
+                elif isinstance(v, (float, np.floating)):
+                    formatted.append(str(float(v)))
+                else:
+                    formatted.append(str(v))
+            writer.writerow(formatted)
 
 
 def load_data(task_dir):
@@ -494,31 +513,31 @@ def main():
     request_attribution = compute_request_attribution(
         api_requests, tenants, tier_policies, endpoints, quota_overrides
     )
-    request_attribution.to_csv(task_dir / "request_attribution.csv", index=False)
+    save_csv(request_attribution, task_dir / "request_attribution.csv")
     print(f"request_attribution.csv: {len(request_attribution)} rows")
     
     tenant_consumption = compute_tenant_consumption(
         request_attribution, tenants, tier_policies
     )
-    tenant_consumption.to_csv(task_dir / "tenant_consumption.csv", index=False)
+    save_csv(tenant_consumption, task_dir / "tenant_consumption.csv")
     print(f"tenant_consumption.csv: {len(tenant_consumption)} rows")
     
     violation_ledger = compute_violation_ledger(
         request_attribution, tenant_consumption, historical_violations, penalty_rules, tenants
     )
-    violation_ledger.to_csv(task_dir / "violation_ledger.csv", index=False)
+    save_csv(violation_ledger, task_dir / "violation_ledger.csv")
     print(f"violation_ledger.csv: {len(violation_ledger)} rows")
     
     throttle_decisions = compute_throttle_decisions(
         request_attribution, tenants, tier_policies
     )
-    throttle_decisions.to_csv(task_dir / "throttle_decisions.csv", index=False)
+    save_csv(throttle_decisions, task_dir / "throttle_decisions.csv")
     print(f"throttle_decisions.csv: {len(throttle_decisions)} rows")
     
     billing_summary = compute_billing_summary(
         tenant_consumption, violation_ledger, tenants, tier_policies
     )
-    billing_summary.to_csv(task_dir / "billing_summary.csv", index=False)
+    save_csv(billing_summary, task_dir / "billing_summary.csv")
     print(f"billing_summary.csv: {len(billing_summary)} rows")
 
 
