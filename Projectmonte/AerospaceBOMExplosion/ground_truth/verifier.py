@@ -47,7 +47,7 @@ def verify_exploded_requirements(student_df, golden_df):
     
     qty_match = 0
     for _, row in merged.iterrows():
-        if abs(row["total_required_qty_s"] - row["total_required_qty_g"]) < 0.01:
+        if abs(row["total_required_qty_s"] - row["total_required_qty_g"]) <= 0.01:
             qty_match += 1
     
     pct = (qty_match / len(merged)) * 100 if len(merged) > 0 else 0
