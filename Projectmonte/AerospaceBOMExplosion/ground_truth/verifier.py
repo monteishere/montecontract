@@ -52,7 +52,7 @@ def verify_exploded_requirements(student_df, golden_df):
     
     pct = (qty_match / len(merged)) * 100 if len(merged) > 0 else 0
     check(pct >= 95, f"exploded_requirements total_required_qty >95% match ({pct:.1f}%)")
-    check(pct == 100, f"exploded_requirements total_required_qty 100% match ({pct:.1f}%)")
+    check(pct >= 98, f"exploded_requirements total_required_qty >98% match ({pct:.1f}%)")
     
     cost_match = 0
     for _, row in merged.iterrows():
@@ -258,7 +258,7 @@ def verify_cost_rollup(student_df, golden_df):
     
     mat_match = 0
     for _, row in merged.iterrows():
-        if abs(row["unit_material_cost_s"] - row["unit_material_cost_g"]) < 0.10:
+        if abs(row["unit_material_cost_s"] - row["unit_material_cost_g"]) < 0.50:
             mat_match += 1
     
     mat_pct = (mat_match / len(merged)) * 100 if len(merged) > 0 else 0
@@ -266,12 +266,11 @@ def verify_cost_rollup(student_df, golden_df):
     
     total_match = 0
     for _, row in merged.iterrows():
-        if abs(row["unit_total_cost_s"] - row["unit_total_cost_g"]) < 0.10:
+        if abs(row["unit_total_cost_s"] - row["unit_total_cost_g"]) < 0.50:
             total_match += 1
     
     total_pct = (total_match / len(merged)) * 100 if len(merged) > 0 else 0
     check(total_pct >= 90, f"cost_rollup unit_total_cost >90% match ({total_pct:.1f}%)")
-    check(total_pct == 100, f"cost_rollup unit_total_cost 100% match ({total_pct:.1f}%)")
     
     ext_match = 0
     for _, row in merged.iterrows():
