@@ -597,6 +597,127 @@ All automated checks must pass:
 
 ---
 
+---
+
+## RULE NINE: Prompt-Oracle Alignment (Fairness)
+
+**EVERY behavior the oracle implements silently must be explicitly stated in the prompt.**
+
+Unfair verdicts are triggered when an agent makes a reasonable interpretation of the prompt that differs from the oracle's hidden logic. The agent does not fail because it cannot reason — it fails because the prompt left out a required specification. Evaluators will flag this every time.
+
+---
+
+### THE FIVE ANTI-PATTERNS THAT CAUSE UNFAIR VERDICTS
+
+These are the exact root causes observed in real failed evaluations. Memorize and avoid all five.
+
+---
+
+**ANTI-PATTERN 1: Undocumented Sort Tie-Breaker**
+
+Oracle sorts by `[timestamp, request_id]` but prompt only says "process chronologically". Agent sorts by `[timestamp]` alone — valid interpretation, wrong output.
+
+With even 5% of rows sharing a timestamp, every running counter and cumulative value diverges, causing 3–10% mismatch on high-strictness checks.
+
+Rule: Every `sort_values()` call with more than one key must have ALL keys stated in the prompt, in order.
+
+BAD: "Process each request chronologically."
+
+GOOD: "Sort requests by timestamp ascending, using request_id ascending as a secondary sort key when timestamps are equal, then process in that order."
+
+---
+
+**ANTI-PATTERN 2: Silent Field Validation (Implicit Whitelist)**
+
+Oracle contains `if field_name in known_fields_dict:` and silently ignores rows where the field name does not match. The data contains a non-matching field name. Agent sees the row, applies it, oracle ignores it — results diverge on every affected tenant.
+
+Rule: Any lookup, mapping, or dictionary key check in the oracle that can silently skip a row must be documented in the prompt as an explicit filter rule.
+
+BAD: "Apply quota_overrides that are active on the request timestamp."
+
+GOOD: "Apply quota_overrides that are active on the request timestamp. The override_field must exactly match one of: hourly_request_limit, daily_request_limit, daily_token_limit. Silently ignore any override row whose override_field does not exactly match one of those three names."
+
+---
+
+**ANTI-PATTERN 3: Ambiguous Sentinel Values in Data**
+
+Data contains a cell like `override_value=0` with `reason='Unlimited enterprise'`. The value 0 is semantically ambiguous — does it mean zero limit (no requests allowed) or unlimited (no limit applied)? Agent picks one interpretation, oracle picks the other.
+
+This is compounded when Anti-Pattern 2 also applies (the row may be silently ignored anyway). The ambiguity still causes an UNFAIR verdict because the evaluator flags the data design as misleading.
+
+Rule: Either remove sentinel-value rows from the data entirely, or document the exact meaning of every special value in the prompt.
+
+BAD: Data contains `override_value=0, reason=Unlimited enterprise` with no prompt explanation.
+
+GOOD: Either remove the row, or add to prompt: "An override_value of 0 for a limit field means the limit is disabled and no throttling applies for that dimension."
+
+---
+
+**ANTI-PATTERN 4: Hardcoded Constant Not Derivable from Data**
+
+Oracle computes `base_cost = price * (3 / 30)` — a hardcoded fraction the agent cannot derive from the input files. Agent uses a logically correct alternative like `days_in_period / 31` or `days_in_period / days_in_month`, producing a different result.
+
+Rule: Any constant or formula used by the oracle must either be derivable from the data (no guessing) or explicitly stated in the prompt including intermediate rounding steps.
+
+BAD: "Compute base_cost as the base monthly price scaled by the coverage period."
+
+GOOD: "Compute base_cost by first computing period_fraction as the count of distinct calendar days in the tenant data period divided by the actual number of calendar days in the billing month, rounded to 4 decimal places, then multiply by the tier base_monthly_price and round to 2 decimal places."
+
+---
+
+**ANTI-PATTERN 5: Oracle Logic That Depends on Input File Schema Not Visible in Prompt**
+
+Oracle looks up column names from an input CSV at runtime (e.g., a limits dictionary built from tier_policies columns). If any input row references a column name that does not exist in that CSV, the oracle skips it silently. The agent reads the same column name from the CSV, treats it as valid, and applies it.
+
+Rule: When the valid values of a field in one CSV are directly determined by column names in another CSV, state this relationship in the prompt.
+
+BAD: "Apply the override."
+
+GOOD: "The override_field value must match a column name present in tier_policies. If no matching column exists, ignore the override row."
+
+---
+
+### PROMPT FAIRNESS CHECKLIST (Run Before Every Submission)
+
+For every piece of logic in oracle_solution.py, answer these questions:
+
+| Oracle Does This | Prompt Must State This |
+|---|---|
+| `sort_values([col_a, col_b])` | Both sort keys and their direction |
+| `if field in dict:` (silent skip) | Exact valid values for the field and what happens when the field does not match |
+| `value == 0` treated as sentinel | What 0 means vs a real zero |
+| `round(x, n)` at intermediate step | That intermediate rounding happens and at which step |
+| Uses a hardcoded constant (e.g. 30, 0.03, 1.5) | Either derive it from data or state the exact value and formula |
+| Different null behavior per column | Each column's null rule stated separately |
+| Priority ordering in conditional chain | Priority order explicitly listed (check rule 1 first, then rule 2, etc.) |
+| Includes historical records from a separate file | State that historical records are included and which file they come from |
+| Ignores records matching a filter (e.g. resolved=YES) | State the filter condition explicitly |
+| Output sorted by specific columns | State the exact sort columns and direction |
+
+---
+
+### ORACLE SILENT LOGIC AUDIT
+
+Before submitting, read through oracle_solution.py and flag every line that matches these patterns. Each flagged line needs a corresponding sentence in prompt.txt.
+
+```
+Patterns to flag in oracle:
+  if x in dict:                        -> document valid keys in prompt
+  if x in [list]:                       -> document the list or condition in prompt
+  sort_values([a, b])                   -> document both sort keys in prompt
+  if value == 0:                        -> document sentinel meaning in prompt
+  constant = 3 / 30                     -> document formula or state the value in prompt
+  if col not in df.columns:             -> document expected columns in prompt
+  df[df['col'] == SPECIFIC_VALUE]       -> document the filter condition in prompt
+  round(x, n)  # intermediate           -> document that intermediate rounding happens in prompt
+  if prev_value is None: use_default    -> document the default value and condition in prompt
+  .fillna(specific_value)               -> document null handling for that column in prompt
+```
+
+If you cannot add a prompt sentence for a flagged oracle line without "giving away" the answer, that means the logic should be moved to the difficulty layer (where it trips AI naturally), not hidden as a silent filter.
+
+---
+
 ## Difficulty Guidelines
 
 ### Target: 1-3 out of 10 AI Pass Rate
@@ -651,10 +772,15 @@ These patterns consistently cause AI to fail 7 to 9 out of 10 runs while still s
 - [ ] Output filename explicit
 - [ ] All columns listed with types/units
 - [ ] All formulas provided (no discovery required)
-- [ ] Rounding rules stated
-- [ ] Missing data handling stated
+- [ ] Rounding rules stated for each step, not just final output
+- [ ] Missing data handling stated per column (different nulls may mean different things)
 - [ ] Edge case handling stated
 - [ ] Sounds natural, not robotic
+- [ ] Every `sort_values()` with multiple keys in the oracle has ALL keys and directions stated
+- [ ] Every silent filter or field-name validation in the oracle is documented
+- [ ] No sentinel values in data (0 meaning unlimited, -1 meaning disabled) without explicit prompt explanation
+- [ ] No hardcoded constants in oracle without a formula or derivation stated in prompt
+- [ ] Any priority ordering in conditional logic is explicitly stated as an ordered list
 
 ### Data:
 - [ ] Realistic distribution
