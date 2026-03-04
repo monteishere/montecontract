@@ -1,4 +1,3 @@
 override_id,tenant_id,effective_start,effective_end,override_field,override_value,reason,approved_by
 OVR001,T0055,2025-01-01,2025-01-31,daily_request_limit,200000,Contract negotiation,admin@system.com
 OVR002,T0058,2025-01-10,2025-01-20,daily_token_limit,10000000,POC project,admin@system.com
-OVR003,T0060,2025-01-01,2025-12-31,rate_limit_override,0,Unlimited enterprise,admin@system.com

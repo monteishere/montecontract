@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import calendar
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -443,7 +444,11 @@ def compute_billing_summary(tenant_consumption, violation_ledger, tenants, tier_
             "overage_rate_per_1k_tokens": 0,
         })
         
-        period_fraction = 3 / 30
+        tenant_buckets = tenant_consumption[tenant_consumption["tenant_id"] == tenant_id]["quota_bucket"]
+        period_days = tenant_buckets.nunique()
+        billing_month = pd.to_datetime(tenant_buckets.min())
+        days_in_month = calendar.monthrange(billing_month.year, billing_month.month)[1]
+        period_fraction = round(period_days / days_in_month, 4)
         base_cost = round(pricing["base_monthly_price"] * period_fraction, 2)
         
         overage_req = row["overage_requests"]
