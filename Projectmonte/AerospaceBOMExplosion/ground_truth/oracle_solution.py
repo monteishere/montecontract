@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -36,7 +37,7 @@ def explode_bom(assemblies, bom_structure):
             child_id = child["child_id"]
             scrap_rate = child["scrap_rate"] if pd.notna(child["scrap_rate"]) else 0.0
             adj_qty = child["quantity_per"] * (1 + scrap_rate)
-            exploded_qty = round(parent_qty * adj_qty, 4)
+            exploded_qty = round(parent_qty * adj_qty, 2)
             
             requirements[child_id]["total_qty"] += exploded_qty
             requirements[child_id]["sources"].append({
@@ -128,6 +129,8 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
             "unit_cost": row["unit_cost"],
         }
     
+    sub_pool = {comp_id: info["available"] for comp_id, info in inv_map.items()}
+    
     rows = []
     for _, req in exploded_requirements.iterrows():
         comp_id = req["component_id"]
@@ -154,8 +157,7 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
         for sub in subs_sorted:
             sub_comp = sub["substitute"]
             factor = sub["factor"]
-            sub_inv = inv_map.get(sub_comp, {"available": 0})
-            sub_avail = sub_inv["available"]
+            sub_avail = sub_pool.get(sub_comp, 0)
             
             qty_needed_from_sub = round(gross_shortage * factor, 2)
             
@@ -170,6 +172,12 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
                 substitute_factor = factor
                 substitute_available = sub_avail
                 substitute_can_cover = "PARTIAL"
+        
+        if substitute_id and substitute_can_cover in ("YES", "PARTIAL"):
+            if substitute_can_cover == "YES":
+                sub_pool[substitute_id] = max(0, sub_pool.get(substitute_id, 0) - round(gross_shortage * substitute_factor, 2))
+            else:
+                sub_pool[substitute_id] = 0
         
         info = comp_info.get(comp_id, {"is_critical": "NO"})
         is_critical = info["is_critical"]
@@ -231,8 +239,7 @@ def compute_purchase_orders(material_shortages, components, suppliers, supplier_
         supplier_id = info["default_supplier"]
         min_order = info["min_order_qty"]
         
-        order_qty = max(needed_qty, min_order)
-        order_qty = round(order_qty, 0)
+        order_qty = int(math.ceil(max(needed_qty, 0.001) / min_order) * min_order)
         
         pricing_tiers = pricing_map.get((comp_id, supplier_id), [])
         unit_price = info["unit_cost"]
@@ -285,7 +292,7 @@ def compute_purchase_orders(material_shortages, components, suppliers, supplier_
     return df
 
 
-def compute_critical_path(assemblies, bom_structure, components, suppliers):
+def compute_critical_path(assemblies, bom_structure, components, suppliers, production_calendar):
     bom_dict = defaultdict(list)
     for _, row in bom_structure.iterrows():
         bom_dict[row["parent_id"]].append(row["child_id"])
@@ -296,6 +303,10 @@ def compute_critical_path(assemblies, bom_structure, components, suppliers):
             "lead_time_days": row["lead_time_days"],
             "default_supplier": row["default_supplier"],
         }
+    
+    cal_map = {}
+    for _, row in production_calendar.iterrows():
+        cal_map[row["month"]] = row["capacity_multiplier"]
     
     lead_time_cache = {}
     
@@ -346,6 +357,12 @@ def compute_critical_path(assemblies, bom_structure, components, suppliers):
                 critical_child = child
         
         buffer_days = 14 if priority == "CRITICAL" else 7
+        required_start_days = total_lead_time + buffer_days
+        
+        due_month = str(due_date)[:7]
+        capacity_mult = cal_map.get(due_month, 1.0)
+        capacity_adjusted_days = math.ceil(required_start_days / capacity_mult)
+        required_start_date = (pd.to_datetime(due_date) - pd.Timedelta(days=capacity_adjusted_days)).strftime("%Y-%m-%d")
         
         rows.append({
             "assembly_id": asm_id,
@@ -356,7 +373,9 @@ def compute_critical_path(assemblies, bom_structure, components, suppliers):
             "critical_path_child": critical_child,
             "critical_child_lead_time": critical_child_lt,
             "buffer_days": buffer_days,
-            "required_start_days": total_lead_time + buffer_days,
+            "required_start_days": required_start_days,
+            "capacity_adjusted_days": capacity_adjusted_days,
+            "required_start_date": required_start_date,
         })
     
     df = pd.DataFrame(rows)
@@ -429,7 +448,7 @@ def compute_cost_rollup(assemblies, bom_structure, components, labor_rates):
             adj_qty = qty * (1 + scrap)
             
             child_cost = get_cost(child_id)
-            total_material += child_cost["total"] * adj_qty
+            total_material += round(child_cost["total"] * adj_qty, 2)
         
         if item_id.startswith("SUB"):
             labor_add = 25.0
@@ -507,7 +526,7 @@ def main():
     purchase_orders = compute_purchase_orders(shortages, components, suppliers, supplier_pricing)
     purchase_orders.to_csv(task_dir / "purchase_orders.csv", index=False)
     
-    critical_path = compute_critical_path(assemblies, bom_structure, components, suppliers)
+    critical_path = compute_critical_path(assemblies, bom_structure, components, suppliers, production_calendar)
     critical_path.to_csv(task_dir / "critical_path_analysis.csv", index=False)
     
     cost_rollup = compute_cost_rollup(assemblies, bom_structure, components, labor_rates)

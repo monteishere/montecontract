@@ -107,6 +107,13 @@ def verify_material_shortages(student_df, golden_df, exploded_df):
     with_subs = len(merged[(merged["substitute_id_g"].notna()) & (merged["substitute_id_g"] != "")])
     check(with_subs > 0, f"material_shortages has items with substitutes ({with_subs} > 0)")
     
+    sub_avail_match = 0
+    for _, row in merged.iterrows():
+        if abs(float(row["substitute_available_s"]) - float(row["substitute_available_g"])) < 0.5:
+            sub_avail_match += 1
+    sub_avail_pct = (sub_avail_match / len(merged)) * 100 if len(merged) > 0 else 0
+    check(sub_avail_pct >= 90, f"material_shortages substitute_available >90% match ({sub_avail_pct:.1f}%)")
+    
     sub_match = 0
     for _, row in merged.iterrows():
         s = str(row.get("substitute_can_cover_s", ""))
@@ -172,7 +179,7 @@ def verify_critical_path(student_df, golden_df):
     
     required_cols = ["assembly_id", "priority", "due_date", "total_lead_time_days",
                      "num_direct_children", "critical_path_child", "critical_child_lead_time",
-                     "buffer_days", "required_start_days"]
+                     "buffer_days", "required_start_days", "capacity_adjusted_days", "required_start_date"]
     for col in required_cols:
         check(col in student_df.columns, f"critical_path_analysis has column '{col}'")
     
@@ -213,6 +220,24 @@ def verify_critical_path(student_df, golden_df):
     
     start_pct = (start_match / len(merged)) * 100 if len(merged) > 0 else 0
     check(start_pct >= 90, f"critical_path required_start_days >90% match ({start_pct:.1f}%)")
+    
+    adj_match = 0
+    for _, row in merged.iterrows():
+        if row["capacity_adjusted_days_s"] == row["capacity_adjusted_days_g"]:
+            adj_match += 1
+    
+    adj_pct = (adj_match / len(merged)) * 100 if len(merged) > 0 else 0
+    check(adj_pct >= 80, f"critical_path capacity_adjusted_days >80% match ({adj_pct:.1f}%)")
+    check(adj_pct == 100, f"critical_path capacity_adjusted_days 100% match ({adj_pct:.1f}%)")
+    
+    rsd_match = 0
+    for _, row in merged.iterrows():
+        if str(row["required_start_date_s"]) == str(row["required_start_date_g"]):
+            rsd_match += 1
+    
+    rsd_pct = (rsd_match / len(merged)) * 100 if len(merged) > 0 else 0
+    check(rsd_pct >= 80, f"critical_path required_start_date >80% match ({rsd_pct:.1f}%)")
+    check(rsd_pct == 100, f"critical_path required_start_date 100% match ({rsd_pct:.1f}%)")
 
 
 def verify_cost_rollup(student_df, golden_df):
@@ -233,7 +258,7 @@ def verify_cost_rollup(student_df, golden_df):
     
     mat_match = 0
     for _, row in merged.iterrows():
-        if abs(row["unit_material_cost_s"] - row["unit_material_cost_g"]) < 1.0:
+        if abs(row["unit_material_cost_s"] - row["unit_material_cost_g"]) < 0.10:
             mat_match += 1
     
     mat_pct = (mat_match / len(merged)) * 100 if len(merged) > 0 else 0
@@ -241,7 +266,7 @@ def verify_cost_rollup(student_df, golden_df):
     
     total_match = 0
     for _, row in merged.iterrows():
-        if abs(row["unit_total_cost_s"] - row["unit_total_cost_g"]) < 2.0:
+        if abs(row["unit_total_cost_s"] - row["unit_total_cost_g"]) < 0.10:
             total_match += 1
     
     total_pct = (total_match / len(merged)) * 100 if len(merged) > 0 else 0
@@ -250,7 +275,7 @@ def verify_cost_rollup(student_df, golden_df):
     
     ext_match = 0
     for _, row in merged.iterrows():
-        if abs(row["extended_total_s"] - row["extended_total_g"]) < 10.0:
+        if abs(row["extended_total_s"] - row["extended_total_g"]) < 2.0:
             ext_match += 1
     
     ext_pct = (ext_match / len(merged)) * 100 if len(merged) > 0 else 0
@@ -258,7 +283,7 @@ def verify_cost_rollup(student_df, golden_df):
     
     sell_match = 0
     for _, row in merged.iterrows():
-        if abs(row["selling_price_s"] - row["selling_price_g"]) < 20.0:
+        if abs(row["selling_price_s"] - row["selling_price_g"]) < 5.0:
             sell_match += 1
     
     sell_pct = (sell_match / len(merged)) * 100 if len(merged) > 0 else 0
