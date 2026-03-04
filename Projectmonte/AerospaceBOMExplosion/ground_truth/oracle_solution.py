@@ -4,6 +4,8 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
+ANALYSIS_DATE = "2024-06-01"
+
 
 def load_data(task_dir):
     assemblies = pd.read_csv(task_dir / "assemblies.csv")
@@ -114,11 +116,13 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
     sub_map = defaultdict(list)
     for _, row in substitutions.iterrows():
         if row["approval_status"] == "APPROVED":
-            sub_map[row["primary_component"]].append({
-                "substitute": row["substitute_component"],
-                "factor": row["conversion_factor"],
-                "priority": row["priority_rank"],
-            })
+            # Only use substitutes valid on the analysis date
+            if str(row["effective_from"]) <= ANALYSIS_DATE <= str(row["effective_to"]):
+                sub_map[row["primary_component"]].append({
+                    "substitute": row["substitute_component"],
+                    "factor": row["conversion_factor"],
+                    "priority": row["priority_rank"],
+                })
     
     comp_info = {}
     for _, row in components.iterrows():
@@ -181,7 +185,19 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
         
         info = comp_info.get(comp_id, {"is_critical": "NO"})
         is_critical = info["is_critical"]
-        
+
+        # Compute shortage_severity
+        if is_critical == "YES" and substitute_can_cover == "NO":
+            shortage_severity = "CRITICAL"
+        elif is_critical == "YES" and substitute_can_cover in ("YES", "PARTIAL"):
+            shortage_severity = "HIGH"
+        elif is_critical == "NO" and net_shortage >= 500:
+            shortage_severity = "HIGH"
+        elif is_critical == "NO" and net_shortage >= 100:
+            shortage_severity = "MEDIUM"
+        else:
+            shortage_severity = "LOW"
+
         rows.append({
             "component_id": comp_id,
             "required_qty": round(needed, 2),
@@ -194,6 +210,7 @@ def compute_material_shortages(exploded_requirements, inventory, substitutions, 
             "substitute_factor": substitute_factor,
             "substitute_available": substitute_available,
             "substitute_can_cover": substitute_can_cover,
+            "shortage_severity": shortage_severity,
         })
     
     df = pd.DataFrame(rows)

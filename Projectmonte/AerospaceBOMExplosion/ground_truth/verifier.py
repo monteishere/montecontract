@@ -76,7 +76,8 @@ def verify_material_shortages(student_df, golden_df, exploded_df):
     
     required_cols = ["component_id", "required_qty", "available_qty", "on_order_qty",
                      "gross_shortage", "net_shortage", "is_critical", "substitute_id",
-                     "substitute_factor", "substitute_available", "substitute_can_cover"]
+                     "substitute_factor", "substitute_available", "substitute_can_cover",
+                     "shortage_severity"]
     for col in required_cols:
         check(col in student_df.columns, f"material_shortages has column '{col}'")
     
@@ -122,7 +123,15 @@ def verify_material_shortages(student_df, golden_df, exploded_df):
             sub_match += 1
     
     sub_pct = (sub_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(sub_pct >= 85, f"material_shortages substitute_can_cover >85% match ({sub_pct:.1f}%)")
+    check(sub_pct >= 95, f"material_shortages substitute_can_cover >95% match ({sub_pct:.1f}%)")
+    
+    severity_match = 0
+    for _, row in merged.iterrows():
+        if str(row.get("shortage_severity_s", "")) == str(row.get("shortage_severity_g", "")):
+            severity_match += 1
+    severity_pct = (severity_match / len(merged)) * 100 if len(merged) > 0 else 0
+    check(severity_pct >= 90, f"material_shortages shortage_severity >90% match ({severity_pct:.1f}%)")
+    check(severity_pct >= 95, f"material_shortages shortage_severity >95% match ({severity_pct:.1f}%)")
     
     critical_rows = merged[merged["is_critical_g"] == "YES"]
     check(len(critical_rows) > 0, "material_shortages has critical items")
@@ -154,6 +163,14 @@ def verify_purchase_orders(student_df, golden_df):
     
     val_pct = (value_match / len(merged)) * 100 if len(merged) > 0 else 0
     check(val_pct >= 90, f"purchase_orders total_value >90% match ({val_pct:.1f}%)")
+    
+    po_num_match = 0
+    for _, row in merged.iterrows():
+        if str(row.get("po_number_s", "")) == str(row.get("po_number_g", "")):
+            po_num_match += 1
+    po_num_pct = (po_num_match / len(merged)) * 100 if len(merged) > 0 else 0
+    check(po_num_pct >= 90, f"purchase_orders po_number assignment >90% match ({po_num_pct:.1f}%)")
+    check(po_num_pct == 100, f"purchase_orders po_number assignment 100% match ({po_num_pct:.1f}%)")
     
     lines_match = 0
     for _, row in merged.iterrows():
