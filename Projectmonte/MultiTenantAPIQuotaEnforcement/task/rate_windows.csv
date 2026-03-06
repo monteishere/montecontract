@@ -1,5 +1,0 @@
-window_id,window_seconds,reset_type,applies_to_requests,applies_to_tokens
-MINUTE,60,sliding,YES,NO
-HOUR,3600,sliding,YES,NO
-DAY,86400,fixed,YES,YES
-MONTH,0,billing_cycle,YES,YES

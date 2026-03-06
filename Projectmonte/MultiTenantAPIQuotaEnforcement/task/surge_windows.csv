@@ -1,0 +1,4 @@
+surge_id,applies_to_category,effective_start_utc,effective_end_utc,surge_multiplier
+SW001,write,2025-01-01 00:00:00,2025-01-02 00:00:00,1.5
+SW002,batch,2025-01-02 06:00:00,2025-01-03 18:00:00,1.4
+SW003,read,2025-01-15 00:00:00,2025-01-31 00:00:00,1.2

@@ -1,0 +1,30 @@
+{
+  "READ": {
+    "FREE": 0.5,
+    "STARTER": 0.7,
+    "PROFESSIONAL": 1.0,
+    "BUSINESS": 1.0
+  },
+  "WRITE": {
+    "FREE": 2.0,
+    "STARTER": 1.5,
+    "PROFESSIONAL": 1.2,
+    "BUSINESS": 1.1,
+    "ENTERPRISE": 1.0
+  },
+  "BATCH": {
+    "STARTER": 3.0,
+    "PROFESSIONAL": 2.5,
+    "BUSINESS": 2.0,
+    "ENTERPRISE": 1.5
+  },
+  "ADMIN": {
+    "BUSINESS": 0.8,
+    "ENTERPRISE": 0.5
+  },
+  "HEALTH": {
+    "FREE": 0.1,
+    "STARTER": 0.1,
+    "PROFESSIONAL": 0.1
+  }
+}
