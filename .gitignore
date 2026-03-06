@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+task/request_attribution.csv
+task/tenant_consumption.csv
+task/violation_ledger.csv
+task/throttle_decisions.csv
+task/billing_summary.csv
+task/cost_rollup.csv
+task/exploded_requirements.csv
+task/material_shortages.csv
+task/purchase_orders.csv
+task/supplier_scorecard.csv
