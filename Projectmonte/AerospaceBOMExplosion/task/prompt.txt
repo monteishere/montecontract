@@ -1,11 +1,39 @@
-You are an aerospace manufacturing analyst preparing a production readiness report for the upcoming build cycle, covering material availability, supply chain risk, and total build cost. Read all input files from the task directory. The analysis date is June 1, 2024. Round monetary values and quantities to four decimal places unless stated.
+You are an aerospace manufacturing analyst preparing a production readiness report for the next build cycle. The objective is to evaluate supplier reliability, component demand coverage, shortage exposure, procurement actions, and final assembly cost. Read all input files from the task directory. The analysis date is 2024-06-01. Unless stated otherwise, numeric outputs should be rounded to 4 decimal places.
 
-Write supplier_scorecard.csv with one row per supplier. Columns: supplier_id, total_deliveries, on_time_deliveries, reliability_score, consecutive_late_count, average_delay_days. The reliability_score is on-time divided by total rounded to four decimal places. The consecutive_late_count is the length of the unbroken late streak at the end of the delivery record, inclusive — if the most recent delivery was late it contributes, and the count is zero when the last delivery was on time. The average_delay_days is the mean delay in calendar days across late deliveries only, rounded to two decimal places and zero when none were late. Sort by supplier_id.
+Produce five output files in the task directory:
 
-Write exploded_requirements.csv showing the total compounded component demand for each assembly. Columns: assembly_id, component_id, demand_qty, gross_qty_required, net_qty_required, unit_price, contract_discount, discounted_unit_price. Each row covers one assembly-component pair. demand_qty is the assembly's demand_quantity from assemblies.csv. gross_qty_required is the full demand incorporating scrap losses that compound at every level of the bill of materials at a rate of quantity_per times one plus the scrap_rate per edge, down through sub-assembly and module levels to leaf components. net_qty_required is gross_qty_required minus available inventory (on-hand minus allocated, floor zero). unit_price is the applicable tier at the gross_qty_required. The contract_discount is the rate in the supplier contracts file matching the component's default supplier and category — when that combination is absent, or when every matching entry falls outside June 1, 2024 (effective_from on or before and effective_to on or after), the discount is zero. discounted_unit_price is unit_price times one minus the contract_discount. Sort by assembly_id then component_id.
+supplier_scorecard.csv
+Purpose: summarize supplier delivery performance and lateness risk.
+Columns: supplier_id, total_deliveries, on_time_deliveries, reliability_score, consecutive_late_count, average_delay_days
+Expected interpretation: reliability_score should reflect on-time performance, consecutive_late_count should represent the current ending late streak, and average_delay_days should summarize delay behavior for late deliveries.
+Sort: supplier_id
 
-Write material_shortages.csv for every row where net_qty_required is greater than zero. Columns: assembly_id, component_id, net_qty_required, available_substitute_qty, shortage_covered, shortage_severity. available_substitute_qty is the total on-hand stock of all approved substitutes for that component. shortage_covered is YES when available_substitute_qty meets or exceeds net_qty_required and NO otherwise. shortage_severity is CRITICAL when the component is flagged as critical or net_qty_required exceeds fifty, and STANDARD otherwise. Sort by assembly_id then component_id.
+exploded_requirements.csv
+Purpose: show assembly-level component demand after multi-level BOM expansion and inventory offset.
+Columns: assembly_id, component_id, demand_qty, gross_qty_required, net_qty_required, unit_price, contract_discount, discounted_unit_price
+Expected interpretation: gross quantities should reflect compounded BOM usage (including scrap effects), net quantities should account for available inventory, unit pricing should follow supplier pricing tiers, and contract_discount should use supplier-contract eligibility on the analysis date.
+Sort: assembly_id, component_id
 
-Write purchase_orders.csv for each shortage where shortage_covered is NO. Columns: assembly_id, component_id, supplier_id, qty_ordered, unit_price, po_value, expedite_fee, base_lead_time, adjusted_lead_time, consecutive_late_count, reliability_adjusted. supplier_id is the component's default_supplier. qty_ordered is the ceiling of the larger of net_qty_required and min_order_qty. unit_price is from the tiered pricing table at qty_ordered and po_value is qty_ordered times that unit_price. The expedite_fee equals the lesser of three percent of po_value and the supplier's max_expedite_fee. base_lead_time is the lead_time_days from components.csv for the component. consecutive_late_count is the supplier's consecutive_late_count from the scorecard. adjusted_lead_time is the ceiling of base_lead_time multiplied by one plus 0.1 times consecutive_late_count. reliability_adjusted is YES when consecutive_late_count is above zero and NO otherwise. Sort by assembly_id then component_id.
+material_shortages.csv
+Purpose: identify unresolved material risk after considering substitutes.
+Columns: assembly_id, component_id, net_qty_required, available_substitute_qty, shortage_covered, shortage_severity
+Expected interpretation: include only positive net shortages; shortage_covered indicates whether approved substitutes can absorb the shortage; shortage_severity should separate critical shortages from standard ones.
+Sort: assembly_id, component_id
 
-Write cost_rollup.csv with one row per assembly. Columns: assembly_id, demand_qty, capacity_multiplier, material_cost, discounted_material_cost, effective_material_cost, labor_cost, total_cost. demand_qty is the assembly's demand_quantity. The capacity_multiplier comes from only the sheet named operational_schedule in the production schedule spreadsheet — match the assembly's due date month, preferring the row where priority_scope exactly matches the assembly's priority, falling back to the row with priority_scope ALL for that month, or 1.0 when no row qualifies. material_cost is the sum of gross_qty_required times unit_price across all leaf components, and discounted_material_cost is the same sum using discounted_unit_price instead. effective_material_cost is discounted_material_cost times the capacity_multiplier. labor_cost sums gross_qty_required times run_hours_per_unit times labor_rate_per_hour times overhead_rate by component category. total_cost is effective_material_cost plus labor_cost. Sort by assembly_id.
+purchase_orders.csv
+Purpose: propose procurement actions for shortages that are not covered by substitutes.
+Columns: assembly_id, component_id, supplier_id, qty_ordered, unit_price, po_value, expedite_fee, base_lead_time, adjusted_lead_time, consecutive_late_count, reliability_adjusted
+Expected interpretation: purchase quantities should respect shortage and ordering constraints; pricing and PO value should be internally consistent; expedite_fee should respect applicable fee policy limits; base_lead_time must come from components.csv lead_time_days; adjusted_lead_time should reflect supplier lateness behavior; reliability_adjusted indicates whether lateness risk adjustments were applied.
+Sort: assembly_id, component_id
+
+cost_rollup.csv
+Purpose: provide final assembly-level cost with material, labor, and schedule-capacity effects.
+Columns: assembly_id, demand_qty, capacity_multiplier, material_cost, discounted_material_cost, effective_material_cost, labor_cost, total_cost
+Expected interpretation: material_cost and discounted_material_cost should roll up leaf-component requirements from exploded_requirements; capacity_multiplier must come from the production schedule sheet operational_schedule using applicable month and priority logic; effective_material_cost applies capacity impact; labor_cost should reflect category-based run-hour and labor-rate inputs; total_cost combines effective material and labor costs.
+Sort: assembly_id
+
+General requirements:
+- Use exact column names as listed above.
+- Keep cross-file consistency (for example, quantities and prices used downstream should reconcile with upstream outputs).
+- Use deterministic ordering exactly as specified for each file.
+- Write only the five required output files.
