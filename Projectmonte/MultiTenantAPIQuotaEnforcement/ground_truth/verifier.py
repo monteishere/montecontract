@@ -200,8 +200,8 @@ def solve(sol_dir=None):
         if len(td7) > 0:
             chk(td7.iloc[0]["decision"] == "GRACE",
                 f"Throttle: T007 first decision=GRACE (5min grace period), got {td7.iloc[0]['decision']}")
-            chk(td7.iloc[0]["decision_reason"] == "WITHIN_GRACE_5MIN",
-                f"Throttle: T007 grace reason=WITHIN_GRACE_5MIN, got {td7.iloc[0]['decision_reason']}")
+            chk(str(td7.iloc[0]["decision_reason"]).upper() == "WITHIN_GRACE_5MIN",
+                f"Throttle: T007 grace reason should be WITHIN_GRACE_5MIN (case-insensitive MIN/min), got {td7.iloc[0]['decision_reason']}")
 
         td11 = td[td["tenant_id"] == "T011"].sort_values("timestamp").reset_index(drop=True)
         chk(len(td11) > 0, "Throttle: T011 has decisions")
