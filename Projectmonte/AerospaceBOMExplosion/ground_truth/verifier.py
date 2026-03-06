@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-SOL = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
+SOL = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent.parent / "task"
 GT  = Path(__file__).parent
 
 FASTENER_COVERED = {
@@ -380,8 +380,9 @@ if not er.empty and not po.empty:
         if len(multi_disc):
             err("T3", f"Components with inconsistent contract_discount across assemblies: {list(multi_disc.index)[:5]}")
 
-total = 120  
+total = 120
 n_errors = len(errors)
+score = total - n_errors
 
 print(f"\n{'='*60}")
 print(f"AerospaceBOMExplosion V2 — Verifier Results")
@@ -392,6 +393,5 @@ if errors:
 else:
     print("  All checks passed.")
 print(f"{'='*60}")
-print(f"Reasoning errors: {n_errors}")
-print(f"Result: {'PASS' if n_errors == 0 else 'FAIL'}")
+print(f"Score: {score}/{total}")
 sys.exit(0 if n_errors == 0 else 1)
