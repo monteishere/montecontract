@@ -106,7 +106,7 @@ def compute_supplier_scorecard(dlv):
             "average_delay_days":     avg_delay,
         })
     df = pd.DataFrame(rows).sort_values("supplier_id").reset_index(drop=True)
-    df.to_csv(GT / "supplier_scorecard.csv", index=False)
+    df.to_csv(TASK / "supplier_scorecard.csv", index=False)
     return df
 
 def compute_exploded_requirements(asm, comp, bom, inv, pric, ctrs):
@@ -146,7 +146,7 @@ def compute_exploded_requirements(asm, comp, bom, inv, pric, ctrs):
     df = (pd.DataFrame(rows)
             .sort_values(["assembly_id", "component_id"])
             .reset_index(drop=True))
-    df.to_csv(GT / "exploded_requirements.csv", index=False)
+    df.to_csv(TASK / "exploded_requirements.csv", index=False)
     return df
 
 def compute_material_shortages(expl_df, subs, inv, comp):
@@ -184,7 +184,7 @@ def compute_material_shortages(expl_df, subs, inv, comp):
     df = (pd.DataFrame(rows)
             .sort_values(["assembly_id", "component_id"])
             .reset_index(drop=True))
-    df.to_csv(GT / "material_shortages.csv", index=False)
+    df.to_csv(TASK / "material_shortages.csv", index=False)
     return df
 
 def compute_purchase_orders(shortages_df, comp, pric, exp_df, scorecard_df):
@@ -235,7 +235,7 @@ def compute_purchase_orders(shortages_df, comp, pric, exp_df, scorecard_df):
     df = (pd.DataFrame(rows)
             .sort_values(["assembly_id", "component_id"])
             .reset_index(drop=True))
-    df.to_csv(GT / "purchase_orders.csv", index=False)
+    df.to_csv(TASK / "purchase_orders.csv", index=False)
     return df
 
 def compute_cost_rollup(asm, expl_df, comp, lab, sched):
@@ -273,7 +273,7 @@ def compute_cost_rollup(asm, expl_df, comp, lab, sched):
             "total_cost":                round(eff_mat + lab_cost, 4),
         })
     df = pd.DataFrame(rows)
-    df.to_csv(GT / "cost_rollup.csv", index=False)
+    df.to_csv(TASK / "cost_rollup.csv", index=False)
     return df
 
 if __name__ == "__main__":
