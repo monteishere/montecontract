@@ -221,6 +221,19 @@ Claude CANNOT look at data and infer patterns. When a rule says "apply the stand
 - The solver must figure out the factors from those reference records, then apply to new records
 - "Use the tier thresholds as established in the historical data" (thresholds must be discovered)
 
+### WEAKNESS 11: Mixed File Format Parsing
+Claude is proficient at reading CSVs. It makes subtle but compounding mistakes when data spans multiple formats that each have format-specific traps.
+
+**How to exploit:**
+- Store a lookup table as a JSON file where the keys have inconsistent casing ("NORTH" vs "North") that must be normalized before lookup
+- Use an XLSX file with two sheets where only one sheet is relevant and the other contains misleading columns with the same names
+- Store time-series data as Parquet with timezone-aware timestamps that differ from the naive timestamps in the CSV event log — the join only works if both are normalized to UTC
+- Use a pipe-delimited TXT file (not comma) where some values contain embedded commas, designed to break naive CSV readers
+- Pack configuration data in a JSON file with nested objects three levels deep — misreading the nesting means every rate lookup returns the wrong value
+- Use an XLSX where numeric IDs are stored as Text cells (not Number) causing silent type-mismatch failures on joins
+
+**Why this works at scale:** A wrong join from a JSON key normalization error corrupts every downstream row silently. AI rarely writes defensive format-specific parsing code and almost never validates that the join produced the expected row count before continuing.
+
 ---
 
 ## CHALLENGE BLUEPRINT: How to Combine Weaknesses
@@ -285,22 +298,23 @@ Your challenge is scored on a 10-point scale after submission:
 
 | Category | Points | What It Measures |
 |----------|--------|------------------|
-| Difficulty | 3 | AI pass rate (target: 1-3 out of 10 passes, NOT 100%) |
+| Difficulty | 3 | AI pass rate (target: 0-1 out of 10 passes, NOT 100%) |
 | Failure Quality | 3 | How AI fails (partial credit, reasoning errors) |
-| Prompt Conciseness | 2 | No strict char limit, just be concise and complete |
+| Prompt Conciseness | 2 | Target ~2000 chars — behavioral outcomes, not prescribed methods |
 | Fairness | 2 | No unfair traps, all info stated |
 
 **CRITICAL**: 100% AI pass rate = -3 difficulty points = POOR score
 
-**IDEAL DIFFICULTY**: AI should pass 1 to 3 out of 10 runs. If AI passes 0/10, the challenge may be unfair or ambiguous. If AI passes 4+ out of 10, the challenge is too easy. The sweet spot is when AI gets most checks right (45-52 out of 55) but consistently fails on a few specific checks due to genuine reasoning errors, not ambiguity.
+**IDEAL DIFFICULTY**: AI should pass 0 to 1 out of 10 runs. If AI passes 0/10 because of hidden rules or ambiguity, the challenge is unfair. If AI passes 2+ out of 10, the challenge is too easy. The sweet spot is when AI scores high on individual checks (45–52 out of 55) but consistently fails on the stateful, temporal, and cross-file checks that require perfect execution of compounding rules.
 
-The tests should be at least 25 complex tests and solution should be more than 1000 lines to solve it for a highly complex challenge standards.
+The tests should be at least 25 complex tests and the oracle solution should be more than 1000 lines for a challenge that meets the high complexity standard.
 
 **DATA COMPLEXITY REQUIREMENTS:**
-- At least 7 input CSV files in task/ directory with interrelated data
+- At least 7 input files in task/ using a mix of formats (see Rule Two) — not all CSV
 - At least 5 output files that the solver must generate
-- Data must have complex relationships requiring multi-file joins and cross-referencing
+- Data must have complex relationships requiring multi-file joins with different format parsers
 - Include temporal dependencies, hierarchical structures, and conditional logic chains
+- At least one file should use a non-CSV format (JSON, Parquet, XLSX, or TXT) to force format-aware parsing
 
 ---
 
@@ -360,10 +374,18 @@ Bad: "CSV Parser"
 - golden output / answer files
 - Files from the other/ folder (generation scripts, scratch files, etc.)
 
+**Use Mixed File Formats — this is a difficulty lever, not an afterthought:**
+- At least one lookup table should be in JSON (nested structure, not flat rows)
+- At least one configuration or rate file should be in XLSX with meaningful sheet names the solver must handle
+- Use Parquet for large time-series data — forces format-aware parsing
+- Use delimited TXT for files with non-standard separators or multi-line records
+- Mixing formats means AI has to write correct parsing code for each one and an error in any parser silently poisons all downstream calculations
+
 **Data Quality:**
 - Use realistic distributions
 - Fixed random seed if synthetic
 - Include edge cases at realistic rates (not obvious traps)
+- Embed traps in the data itself: wrong-format dates in one file, whitespace in JSON keys, extra sheet in XLSX that should be ignored
 
 ---
 
@@ -377,27 +399,38 @@ Write naturally, like a real analyst request.
 - **Complete**: Exact output filenames, columns, formulas
 - **Aligned**: What you ask for MUST match golden output
 
+### Length Target: approximately 2000 characters
+
+A prompt is too long when it reads like a specification document with its own table of contents. A prompt is the right length when someone can read it once, understand exactly what they need to build, and get to work. Every sentence should earn its place. If a sentence does not change what the output looks like, cut it.
+
+The way to keep prompts short while keeping challenges hard is to describe behavioral outcomes rather than prescribed methods. You do not need to tell the AI which algorithm to use or how to structure its code. Just state clearly what each output column should contain and what rules govern its value. The difficulty comes from the data relationships and computation chains, not from the prompt complexity.
+
 ### Formatting Style:
 - Write as continuous flowing prose, not sectioned or bulleted lists
-- No section headers, colons, hyphens, or markdown formatting
+- No technical shorthand or hyphenated compound jargon — write "data read" not "Data-read", write "per station per month" not "station-month"
+- No abbreviations without first spelling them out in full — write "Composite Quality Index (CQI)" the first time, then CQI after
+- No colons used as structural dividers in the middle of prose — colons are only for introducing a short list within a sentence
+- No markdown formatting of any kind (no bold, no headers, no bullet points)
 - No unnecessary story, context, or filler text that adds nothing to the requirements
 - Every sentence must convey required information for solving the task
-- Reads like a natural paragraph, not a specification document
+- Reads like a natural paragraph written by a real analyst, not a specification document
+- If you catch yourself writing "X: value" or "X=formula" inline, rewrite it as a sentence — "X is calculated as..."
 
 ### DO:
 - State exact output filename
-- List all required columns
-- Provide formulas for non-standard calculations
-- Define domain terms explicitly
-- Specify thresholds and rounding rules
+- List all required columns in natural language, not as a comma-separated schema line
+- Provide formulas for non-standard calculations written as English sentences
+- Define domain terms the first time they appear
+- Specify thresholds and rounding rules as part of the sentence describing the calculation
+- Say "read all input files from the task directory" — do not list file names
 
 ### DO NOT:
-- List input file names and their column schemas in the prompt. Let the agent explore the CSV files in the task directory and discover the structure themselves. Just say "Read all CSV input files from the task directory."
-- Expect columns not mentioned in prompt
-- Use formulas the model must "discover"
-- Ask to "reverse engineer" patterns
+- Use technical notation like `m<=caution:0` or `CQI>=80:prev*0.15` in the prompt body — write these as English conditions
+- List output columns as a raw comma-separated string — introduce them as a described paragraph
+- Use formulas the model must discover
+- Ask to reverse engineer patterns
 - Assume deep domain knowledge
-- Hide requirements
+- Hide requirements behind abbreviations the model must infer
 
 ### Good Prompt Example:
 
@@ -720,26 +753,28 @@ If you cannot add a prompt sentence for a flagged oracle line without "giving aw
 
 ## Difficulty Guidelines
 
-### Target: 1-3 out of 10 AI Pass Rate
+### Target: 0-1 out of 10 AI Pass Rate
 
-The ideal challenge is one where AI scores high (45-52 out of 55 checks) but consistently gets a few specific checks wrong due to genuine reasoning errors in stateful logic, timing, or cascading dependencies. This means AI understands the problem but cannot perfectly execute the hardest parts.
+The ideal challenge is one where AI scores respectably on structure (correct files, correct column names, correct row counts) but fails consistently on value correctness due to compounding execution errors in stateful logic, format parsing, temporal alignment, and cascading formulas. AI should be able to reason about the problem and produce plausible-looking outputs — just not correct ones.
 
 **TOO EASY (will fail evaluation):**
-- Simple parsing + basic math
+- All inputs in flat CSV, no format diversity
+- Simple parsing plus basic math
 - No interacting rules
 - Obvious edge cases
 - Single-step calculations
-- AI passes 4 or more out of 10 runs
+- AI passes 2 or more out of 10 runs
 
-**GOOD DIFFICULTY:**
-- Multi-step calculations with cascading dependencies
+**GOOD DIFFICULTY (aim for this):**
+- Mixed input formats where parsing errors compound silently
+- Multi-step calculations with cascading dependencies across output files
 - Stateful row-by-row processing where order of operations matters
 - Conditional business logic where timing of updates affects results
 - Counter or accumulator logic where reset conditions are subtle
 - Rolling or cumulative scores that depend on prior computed values
 - Multiple interacting domain rules that compound errors
-- Cross-file joins with conditional strategies
-- AI passes 1 to 3 out of 10 runs, failing on specific checks not random noise
+- Cross-file joins with different conditional strategies per file type
+- AI passes 0 to 1 out of 10 runs, failing on specific value checks not structural checks
 
 **PROVEN PATTERNS THAT TRIP AI (from real evaluations):**
 
@@ -769,13 +804,17 @@ These patterns consistently cause AI to fail 7 to 9 out of 10 runs while still s
 ## Pre-Submission Checklist
 
 ### Prompt:
+- [ ] Total length is approximately 2000 characters — if significantly over, find sentences that prescribe method rather than outcome and cut them
+- [ ] Written in continuous flowing prose — no colons used as structural dividers, no bullet lists, no technical shorthand notation
+- [ ] No hyphenated compound jargon ("station-month" → "per station per month", "Data-read" → "data read")
+- [ ] All acronyms spelled out in full on first use
 - [ ] Output filename explicit
-- [ ] All columns listed with types/units
-- [ ] All formulas provided (no discovery required)
-- [ ] Rounding rules stated for each step, not just final output
+- [ ] All required output columns introduced as natural English descriptions, not raw schema strings
+- [ ] All formulas expressed as English sentences, not code-like notation
+- [ ] Rounding rules stated for each intermediate step, not just the final output
 - [ ] Missing data handling stated per column (different nulls may mean different things)
 - [ ] Edge case handling stated
-- [ ] Sounds natural, not robotic
+- [ ] Reads like a real analyst wrote it
 - [ ] Every `sort_values()` with multiple keys in the oracle has ALL keys and directions stated
 - [ ] Every silent filter or field-name validation in the oracle is documented
 - [ ] No sentinel values in data (0 meaning unlimited, -1 meaning disabled) without explicit prompt explanation
@@ -787,6 +826,10 @@ These patterns consistently cause AI to fail 7 to 9 out of 10 runs while still s
 - [ ] Fixed seed if synthetic
 - [ ] Edge cases at realistic rates (5-15% of rows)
 - [ ] Multiple interacting conditions
+- [ ] At least one input file is JSON, at least one is XLSX or Parquet — not all CSV
+- [ ] JSON keys use inconsistent casing or include whitespace that requires normalization
+- [ ] XLSX contains at least two sheets, only one of which is relevant
+- [ ] Any date columns that span multiple files use different formats or timezone conventions
 
 ### Oracle:
 - [ ] NO COMMENTS anywhere
@@ -812,12 +855,15 @@ These patterns consistently cause AI to fail 7 to 9 out of 10 runs while still s
 
 ## Final Principle
 
-**Measure reasoning, not trick the model.**
+**Measure execution under compounding complexity, not surface-level reasoning.**
 
-If 100% of AI agents pass, your challenge is too easy.
-If 0% pass but it's because of hidden rules, your challenge is unfair.
+A good challenge is one where any competent AI can read the prompt, understand what is being asked, and write code that looks reasonable — but will still fail because the combination of stateful logic, mixed format parsing, temporal alignment, and cascading rounding is too difficult to execute perfectly. The AI should understand the problem. It should not be able to solve it.
 
-Target: 1 to 3 out of 10 pass rate with failures showing partial understanding (scoring 45+ out of 55 checks).
+If 100% of AI agents pass, your challenge is too easy. Reconsider your formulas, add stateful logic, and diversify your input formats.
+
+If 0% pass because of hidden rules or ambiguous instructions, your challenge is unfair. Every behavior the oracle implements must be stated in the prompt.
+
+Target: 0 to 1 out of 10 pass rate, with AI scoring 45 to 52 out of 55 checks — correct on structure and simple values, wrong on the compounding execution checks that require stateful, format-aware, precision-sensitive processing across multiple interacting files.
 
 ---
 
