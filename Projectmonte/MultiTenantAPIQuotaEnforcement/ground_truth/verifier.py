@@ -216,7 +216,8 @@ def solve(sol_dir=None):
     if not ra.empty and not g_ra.empty and "request_id" in ra.columns and "request_id" in g_ra.columns:
         m = pd.merge(ra, g_ra, on="request_id", suffixes=("_s", "_g"))
         if len(m) > 0:
-            tok = (m["effective_tokens_s"].astype(int) == m["effective_tokens_g"].astype(int)).mean()
+            tok = ((pd.to_numeric(m["effective_tokens_s"], errors="coerce") -
+                    pd.to_numeric(m["effective_tokens_g"], errors="coerce")).abs() < 0.001).mean()
             chk(tok >= 0.98, f"Golden RA: effective_tokens >=98% exact match ({tok*100:.1f}%)")
             chk(tok == 1.0,  f"Golden RA: effective_tokens 100% exact match ({tok*100:.1f}%)")
             lim = (m["within_limit_s"] == m["within_limit_g"]).mean()
