@@ -1,39 +1,4 @@
-You are an aerospace manufacturing analyst preparing a production readiness report for the next build cycle. The objective is to evaluate supplier reliability, component demand coverage, shortage exposure, procurement actions, and final assembly cost. Read all input files from the task directory. The analysis date is 2024-06-01. Unless stated otherwise, numeric outputs should be rounded to 4 decimal places.
-
-Produce five output files in the task directory:
-
-supplier_scorecard.csv
-Purpose: summarize supplier delivery performance and lateness risk.
-Columns: supplier_id, total_deliveries, on_time_deliveries, reliability_score, consecutive_late_count, average_delay_days
-Expected interpretation: reliability_score should reflect on-time performance, consecutive_late_count should represent the current ending late streak, and average_delay_days should summarize delay behavior for late deliveries.
-Sort: supplier_id
-
-exploded_requirements.csv
-Purpose: show assembly-level component demand after multi-level BOM expansion and inventory offset.
-Columns: assembly_id, component_id, demand_qty, gross_qty_required, net_qty_required, unit_price, contract_discount, discounted_unit_price
-Expected interpretation: gross quantities should reflect compounded BOM usage (including scrap effects), net quantities should account for available inventory, unit pricing should follow supplier pricing tiers, and contract_discount should use supplier-contract eligibility on the analysis date.
-Sort: assembly_id, component_id
-
-material_shortages.csv
-Purpose: identify unresolved material risk after considering substitutes.
-Columns: assembly_id, component_id, net_qty_required, available_substitute_qty, shortage_covered, shortage_severity
-Expected interpretation: include only positive net shortages; shortage_covered indicates whether approved substitutes can absorb the shortage; shortage_severity should separate critical shortages from standard ones.
-Sort: assembly_id, component_id
-
-purchase_orders.csv
-Purpose: propose procurement actions for shortages that are not covered by substitutes.
-Columns: assembly_id, component_id, supplier_id, qty_ordered, unit_price, po_value, expedite_fee, base_lead_time, adjusted_lead_time, consecutive_late_count, reliability_adjusted
-Expected interpretation: purchase quantities should respect shortage and ordering constraints; pricing and PO value should be internally consistent; expedite_fee should respect applicable fee policy limits; base_lead_time must come from components.csv lead_time_days; adjusted_lead_time should reflect supplier lateness behavior; reliability_adjusted indicates whether lateness risk adjustments were applied.
-Sort: assembly_id, component_id
-
-cost_rollup.csv
-Purpose: provide final assembly-level cost with material, labor, and schedule-capacity effects.
-Columns: assembly_id, demand_qty, capacity_multiplier, material_cost, discounted_material_cost, effective_material_cost, labor_cost, total_cost
-Expected interpretation: material_cost and discounted_material_cost should roll up leaf-component requirements from exploded_requirements; capacity_multiplier must come from the production schedule sheet operational_schedule using applicable month and priority logic; effective_material_cost applies capacity impact; labor_cost should reflect category-based run-hour and labor-rate inputs; total_cost combines effective material and labor costs.
-Sort: assembly_id
-
-General requirements:
-- Use exact column names as listed above.
-- Keep cross-file consistency (for example, quantities and prices used downstream should reconcile with upstream outputs).
-- Use deterministic ordering exactly as specified for each file.
-- Write only the five required output files.
+Prepare a production readiness assessment for the next aerospace build cycle using all inputs in the task directory with analysis date 2024-06-01. The report must show supplier reliability, true component demand after bill of materials expansion, shortage exposure after substitute consideration, purchase actions for unresolved gaps, and final assembly cost under schedule capacity effects. Write only five outputs in the task directory named supplier_scorecard.csv, exploded_requirements.csv, material_shortages.csv, purchase_orders.csv, and cost_rollup.csv, and use the exact column names requested below. Unless a different precision is stated, round numeric quantities and money values to 4 decimal places.
+In supplier_scorecard.csv, include one row per supplier with columns supplier_id, total_deliveries, on_time_deliveries, reliability_score, consecutive_late_count, and average_delay_days, where reliability_score is the on time ratio, consecutive_late_count is the current ending streak of late deliveries, and average_delay_days is the mean delay across late deliveries only with 2 decimal places, then sort by supplier_id. In exploded_requirements.csv, include one row per assembly and component with columns assembly_id, component_id, demand_qty, gross_qty_required, net_qty_required, unit_price, contract_discount, and discounted_unit_price, where demand_qty comes from assembly demand, gross_qty_required reflects full multi level bill of materials expansion including scrap compounding, net_qty_required offsets available inventory floor at zero, unit_price follows supplier pricing tiers at required volume, and contract_discount applies only when supplier contract category and date are valid on 2024-06-01, then sort by assembly_id and component_id.
+In material_shortages.csv, include only rows with positive net_qty_required and columns assembly_id, component_id, net_qty_required, available_substitute_qty, shortage_covered, and shortage_severity, where available_substitute_qty is approved substitute stock, shortage_covered is YES when substitutes fully cover the shortage and NO otherwise, and shortage_severity is CRITICAL for critical components or large shortages and STANDARD otherwise, then sort by assembly_id and component_id. In purchase_orders.csv, include only shortages where shortage_covered is NO with columns assembly_id, component_id, supplier_id, qty_ordered, unit_price, po_value, expedite_fee, base_lead_time, adjusted_lead_time, consecutive_late_count, and reliability_adjusted, where supplier_id is the default supplier, qty_ordered respects shortage and minimum order constraints, po_value is quantity times unit price, expedite_fee follows the policy cap, base_lead_time is lead_time_days from components.csv, adjusted_lead_time is ceil(base_lead_time multiplied by (1 + 0.1 multiplied by consecutive_late_count)), and reliability_adjusted is YES when that adjustment is active and NO otherwise, then sort by assembly_id and component_id.
+In cost_rollup.csv, include one row per assembly with columns assembly_id, demand_qty, capacity_multiplier, material_cost, discounted_material_cost, effective_material_cost, labor_cost, and total_cost, where material_cost and discounted_material_cost roll up leaf component demand from exploded_requirements.csv, capacity_multiplier comes only from the operational_schedule sheet in the production schedule workbook using month and priority applicability, effective_material_cost is discounted_material_cost adjusted by capacity_multiplier, labor_cost is derived from component run hours, labor rates, and overhead mapping, and total_cost equals effective_material_cost plus labor_cost, then sort by assembly_id. Ensure all files are internally and cross file consistent so downstream values reconcile with upstream calculations.
