@@ -277,6 +277,146 @@ Here is a concrete example of a challenge structure that hits 8+ weaknesses and 
 
 ---
 
+## THE KILLING FIELD: VALIDATED DESIGN PATTERNS FROM PRODUCTION
+
+The following patterns are extracted from a real challenge (MultiRegionWaterQualityCompliance) that achieved 30% pass rate, 8/10 overall score, 100% reasoning-error failures, and 2/2 fairness. Every pattern below was confirmed by verifier output across 10 independent AI runs. Use this section as a recipe.
+
+---
+
+### PATTERN 1: The Cascade Kill Zone
+
+**What it is:** One computational block where 4 to 6 distinct subtleties all feed into 4 to 6 separate verifier checks across multiple output files. One mistake in the block fails all checks simultaneously, not just one.
+
+**How to build it:**
+- Identify your most complex calculation (a penalty system, a risk score, a settlement amount) and make it feed into every output file, not just one.
+- Ensure the calculation has at least 4 independently-failsafe subtleties: a lookup, a default, a stateful count, a compounding multiplier, and a cross-file consistency requirement.
+- Write verifier checks for each output file, not just the main one.
+
+**Why it works:** AI that gets 7 out of 8 penalty subtleties correct still fails 5 checks at once because all 5 check different downstream fields of the same broken number. The score drops sharply even when everything else is correct.
+
+**Observed in production:** Runs 1, 3, 5, 7 all scored 50 out of 55. The 5 failed checks were all penalty fields. CQI, RCS, violations, and risk trends all passed. One wrong step in the penalty block was enough.
+
+---
+
+### PATTERN 2: The Silent NaN Default
+
+**What it is:** A lookup table that is intentionally sparse — not all valid key combinations have a matching row. The correct behavior when no row matches is to use a specific non-obvious default value. That default must occupy a multiplicative position in the formula.
+
+**How to build it:**
+- Create a rate or adjustment table with, for example, 17 of 20 possible region-quarter combinations populated. Leave 3 out.
+- The correct default for missing rows is 1.0 (a neutral multiplier), not 0 and not NaN.
+- Place this factor in a multiplicative position: `gross = base × adjustment_factor × other_terms`.
+- If AI does a pandas merge without filling NaN, the entire formula becomes NaN and cascades to every dependent field.
+
+**Why it works:** AI almost always performs a left join or merge without explicitly handling the no-match case. The result is NaN in the adjustment column. NaN × anything = NaN, poisoning the entire formula chain silently with no error message.
+
+**Observed in production:** Run 6 was diagnosed explicitly. Quote from verifier: "The AI failed to default adjustment_factor to 1.0 when absent from regional_adjustments.csv. For 17 station-month combinations, the join produced NaN instead of 1.0."
+
+**Implementation rule:** Do not use 0 as the default (too many AIs accidentally get this right by coincidence). Use 1.0 for multipliers, or a domain-appropriate non-zero constant. State the default explicitly in the prompt so the challenge remains fair.
+
+---
+
+### PATTERN 3: Cross-Output Consistency
+
+**What it is:** The same logical filter or classification must be applied identically in two different output files. AI writes different code for each output and the two diverge by exactly the number of edge-case rows.
+
+**How to build it:**
+- Define a threshold that determines which rows qualify for an output (e.g., "violation tier above zero").
+- Require that threshold to control both a column in one output file (e.g., a non-zero penalty column in the main compliance file) and row inclusion in a separate ledger file.
+- Include edge-case classification values that sit right at the boundary (WATCH with tier = 1 sounds harmless but still qualifies).
+
+**Why it works:** AI writes the compliance file first, then writes the ledger separately. One uses `tier >= 1`, the other uses `tier >= 2` because the AI assumes a name like "WATCH" means no real consequence. The discrepancy is always exactly equal to the number of edge-case rows.
+
+**Observed in production:** All 7 failing runs had exactly 17 rows discrepancy between the compliance file (126 penalized rows) and the penalty ledger (143 rows). The 17 rows were WATCH-class station months — tier 1 — which should have non-zero penalty in both files.
+
+**Implementation rule:** Name at least one boundary class something that sounds inconsequential (WATCH, CAUTION, ADVISORY, MONITOR) but assign it tier 1 with a real computed penalty. State the tier mapping explicitly in the prompt.
+
+---
+
+### PATTERN 4: Prior-Streak Off-By-One (Reads Before Incrementing)
+
+**What it is:** A stateful consecutive count where the value stored for the current row is the length of the preceding streak, not including the current row. The first qualifying row has count 0, not 1.
+
+**How to build it:**
+- In oracle code: read the current consecutive count, store it for the current row, then increment.
+- The first row in a qualifying streak stores 0, the second stores 1, the third stores 2.
+- State this precisely in the prompt: "the consecutive count is the number of immediately preceding consecutive qualifying months, not counting the current month."
+
+**Why it works:** AI instinctively counts including the current row (first qualifying row = 1). Every row in every streak is off by one, causing wrong multipliers on penalties or scores throughout.
+
+**Observed in production:** Multiple runs had consecutive_violations systematically off by 1 across all violation streaks.
+
+**Implementation rule:** Make the consecutive count multiply something expensive (e.g., adds 15 percent per prior month). An off-by-one on a 3-month streak changes (1 + 0.15 × 3) = 1.45 to (1 + 0.15 × 2) = 1.30, a visible dollar difference that verifier checks at tolerance 1.0 will catch.
+
+---
+
+### PATTERN 5: Dual-Key OR Sentinel Lookup
+
+**What it is:** A table where row matching requires field equals target value OR field equals a universal sentinel string. AI almost always implements only the direct match and misses the sentinel branch.
+
+**How to build it:**
+- A holidays table (or exception table) where each row has a scope field containing either a specific region name or the string "ALL".
+- The lookup is: `holidays where region == station.region OR region == "ALL"`.
+- If AI does only `region == station.region`, it misses all universal holidays. If it does only `region == "ALL"`, it misses region-specific ones.
+
+**Why it works:** The natural pandas idiom is `df[df["region"] == region]`. The OR extension to include "ALL" is a deliberate extra step that AI skips about half the time.
+
+**Observed in production:** Workday fraction errors in multiple runs were traced to incomplete holiday lookups. Business days were overcounted because universal holidays were not subtracted.
+
+**Implementation rule:** Put 3 to 5 "ALL" holidays and 2 to 3 per-region-specific holidays in the data. Make sure at least one "ALL" holiday falls in every quarter tested so the error is visible in every quarter's workday fraction.
+
+---
+
+### PATTERN 6: Date-Range Rate Lookup (Not Equality Join)
+
+**What it is:** A rate or price table where each row has an effective_from and effective_to date. The lookup condition is not equality on a single key but `effective_from <= target_date <= effective_to`. AI defaults to equijoin on a single key.
+
+**How to build it:**
+- A penalty rates table where each tier has rates that change over time, with overlapping or gapless date ranges.
+- The match condition requires checking both bounds, not just matching on tier or year.
+- Include at least one rate change mid-period (e.g., rate changes between Q1 and Q2) so wrong date logic picks the wrong base amount.
+
+**Why it works:** AI writes `merged = df.merge(rates, on="violation_tier")` and gets multiple rows if the tier has multiple valid date ranges. AI then either takes the wrong row, averages them, or crashes silently.
+
+**Observed in production:** Base amount mismatches in runs 3, 5, 7 indicate AI matched the wrong rate row for some station months — consistent with either missing the date range condition or matching on tier alone.
+
+**Implementation rule:** Include exactly two effective date periods for at least one tier so the right answer in Q1 differs from Q2. Use month-start date as the lookup point, stated explicitly in the prompt.
+
+---
+
+### PATTERN 7: Double Cap Credit
+
+**What it is:** A credit or discount that is capped on two independent sides simultaneously: the lower of (a percentage of the input cost) and (a percentage of the gross amount). AI usually implements only the cost-side cap.
+
+**How to build it:**
+- Maintenance credit = min(maintenance_cost × 5%, gross_penalty × 20%).
+- This means even if maintenance cost is very high, the credit cannot exceed 20% of the penalty.
+- And even if the penalty is very high, the credit cannot exceed 5% of cost.
+
+**Why it works:** AI reads "5 percent of maintenance cost" and computes that alone. It does not read "or 20 percent of gross penalty, whichever is smaller" as a hard cap. The error only appears when the cost-side cap produces more than the penalty-side cap allows.
+
+**Observed in production:** 6 to 10 maintenance_credit mismatches per failing run, concentrated on rows with unusually high maintenance costs relative to their penalty amounts.
+
+**Implementation rule:** Seed your data so that for 10 to 15 percent of penalized rows, the penalty-side cap (20% of gross) is tighter than the cost-side cap (5% of cost). These are the killer rows that distinguish AI that read the full rule from AI that read only half of it.
+
+---
+
+### THE COMBINATION: Why These 7 Patterns Together Break AI
+
+No single pattern above causes failure alone. A challenge built around only Pattern 2 would be unfair (hidden rule). A challenge with only Pattern 4 would be solved by careful AI. The reason WaterQuality achieved 30% pass rate with 100% reasoning errors and 2/2 fairness is the combination:
+
+1. All rules are stated clearly in the prompt (fairness preserved).
+2. Patterns 2, 5, 6, and 7 are individually subtle but each affects only specific rows.
+3. Pattern 3 creates a cross-file divergence that amplifies into a verifier-visible count mismatch.
+4. Pattern 1 ensures that getting any one of patterns 2 through 7 wrong fails 4 to 5 checks simultaneously, not 1.
+5. Pattern 4 creates a systematic off-by-one across every qualifying row, not just edge cases.
+
+The result is that AI scores well on simpler sections (CQI, RCS, violation classification) but scores near-zero on the penalty block, landing at approximately 50 out of 55 checks passed — high enough to feel close, low enough to fail consistently.
+
+**When designing a new challenge:** Identify your "penalty block," embed all 7 patterns into it, then verify with a test run that the block alone accounts for 4 to 6 separate check failures.
+
+---
+
 ## Challenge Requirements
 
 Your task should push the limit on an AI agent's ability to:
@@ -300,7 +440,7 @@ Your challenge is scored on a 10-point scale after submission:
 |----------|--------|------------------|
 | Difficulty | 3 | AI pass rate (target: 0-1 out of 10 passes, NOT 100%) |
 | Failure Quality | 3 | How AI fails (partial credit, reasoning errors) |
-| Prompt Conciseness | 2 | Target ~2000 chars — behavioral outcomes, not prescribed methods |
+| Prompt Conciseness | 2 | Target ~2000 chars; up to 4000 when full specification demands it. Never exceed 4000. |
 | Fairness | 2 | No unfair traps, all info stated |
 
 **CRITICAL**: 100% AI pass rate = -3 difficulty points = POOR score
@@ -399,7 +539,9 @@ Write naturally, like a real analyst request.
 - **Complete**: Exact output filenames, columns, formulas
 - **Aligned**: What you ask for MUST match golden output
 
-### Length Target: approximately 2000 characters
+### Length Target: 2000 to 4000 characters
+
+Aim for approximately 2000 characters. If specifying all observable behaviors fairly — every formula, every rounding step, every edge case rule — genuinely requires more, extend up to 4000 characters. Never exceed 4000. A prompt that omits a rule to stay short is worse than one that honestly states it.
 
 A prompt is too long when it reads like a specification document with its own table of contents. A prompt is the right length when someone can read it once, understand exactly what they need to build, and get to work. Every sentence should earn its place. If a sentence does not change what the output looks like, cut it.
 
@@ -804,7 +946,7 @@ These patterns consistently cause AI to fail 7 to 9 out of 10 runs while still s
 ## Pre-Submission Checklist
 
 ### Prompt:
-- [ ] Total length is approximately 2000 characters — if significantly over, find sentences that prescribe method rather than outcome and cut them
+- [ ] Total length is between 2000 and 4000 characters — target ~2000; exceed only when needed to fairly specify all observable behaviors; never exceed 4000
 - [ ] Written in continuous flowing prose — no colons used as structural dividers, no bullet lists, no technical shorthand notation
 - [ ] No hyphenated compound jargon ("station-month" → "per station per month", "Data-read" → "data read")
 - [ ] All acronyms spelled out in full on first use
