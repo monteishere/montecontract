@@ -1,560 +1,332 @@
+#!/usr/bin/env python3
+"""
+Oracle solution — AerospaceBOMExplosion V2
+ANALYSIS_DATE = 2024-06-01
+
+Traps:
+  T1 - Cascade Kill Zone:       FASTENER shortage is covered by APPROVED substitution; no PO
+  T2 - Silent NaN Default:      supplier_contracts.json is sparse; absent key → 0.0 discount
+  T3 - Cross-Output Consistency:unit_price in purchase_orders must match tiered pricing at qty_ordered
+  T4 - Prior-Streak Off-By-One: trailing consecutive LATE count (inclusive of last event)
+  T5 - Dual-Key OR Sentinel:    production_schedule.xlsx: exact priority match, then "ALL" sentinel
+       (use sheet "operational_schedule" only — "historical_2023" is a decoy)
+  T6 - Date-Range Rate Lookup:  contract only applies if effective_from <= ANALYSIS_DATE <= effective_to
+  T7 - Double Cap Credit:       expedite_fee = min(po_value * expedite_pct, max_expedite_fee)
+"""
+
+import json
 import math
 import pandas as pd
-import numpy as np
+import pyarrow.parquet as pq
+from datetime import datetime
 from pathlib import Path
-from collections import defaultdict
 
-ANALYSIS_DATE = "2024-06-01"
-
-
-def load_data(task_dir):
-    assemblies = pd.read_csv(task_dir / "assemblies.csv")
-    components = pd.read_csv(task_dir / "components.csv")
-    bom_structure = pd.read_csv(task_dir / "bom_structure.csv")
-    suppliers = pd.read_csv(task_dir / "suppliers.csv")
-    inventory = pd.read_csv(task_dir / "inventory.csv")
-    substitutions = pd.read_csv(task_dir / "substitutions.csv")
-    supplier_pricing = pd.read_csv(task_dir / "supplier_pricing.csv")
-    production_calendar = pd.read_csv(task_dir / "production_calendar.csv")
-    labor_rates = pd.read_csv(task_dir / "labor_rates.csv")
-    return (assemblies, components, bom_structure, suppliers, inventory,
-            substitutions, supplier_pricing, production_calendar, labor_rates)
+TASK          = Path(__file__).parent.parent / "task"
+GT            = Path(__file__).parent
+ANALYSIS_DATE = datetime(2024, 6, 1)
 
 
-def explode_bom(assemblies, bom_structure):
-    bom_dict = defaultdict(list)
-    for _, row in bom_structure.iterrows():
-        bom_dict[row["parent_id"]].append({
-            "child_id": row["child_id"],
-            "quantity_per": row["quantity_per"],
-            "scrap_rate": row["scrap_rate"],
-            "level": row["level"],
-        })
-    
-    requirements = defaultdict(lambda: {"total_qty": 0.0, "sources": []})
-    
-    def explode_recursive(parent_id, parent_qty, path_level, source_assembly):
-        children = bom_dict.get(parent_id, [])
-        for child in children:
-            child_id = child["child_id"]
-            scrap_rate = child["scrap_rate"] if pd.notna(child["scrap_rate"]) else 0.0
-            adj_qty = child["quantity_per"] * (1 + scrap_rate)
-            exploded_qty = round(parent_qty * adj_qty, 2)
-            
-            requirements[child_id]["total_qty"] += exploded_qty
-            requirements[child_id]["sources"].append({
-                "assembly": source_assembly,
-                "parent": parent_id,
-                "qty": exploded_qty,
-                "level": path_level,
-            })
-            
-            if child_id.startswith("SUB") or child_id.startswith("MOD"):
-                explode_recursive(child_id, exploded_qty, path_level + 1, source_assembly)
-    
-    for _, asm in assemblies.iterrows():
-        asm_id = asm["assembly_id"]
-        demand = asm["demand_quantity"]
-        explode_recursive(asm_id, demand, 1, asm_id)
-    
-    return requirements
+# ─── input loading ──────────────────────────────────────────────────────────
+
+def load_inputs():
+    asm   = pd.read_csv(TASK / "assemblies.csv")
+    comp  = pd.read_csv(TASK / "components.csv")
+    bom   = pd.read_csv(TASK / "bom_structure.csv")
+    inv   = pd.read_csv(TASK / "inventory.csv")
+    subs  = pd.read_csv(TASK / "substitutions.csv")
+    pric  = pd.read_csv(TASK / "supplier_pricing.csv")
+    lab   = pd.read_csv(TASK / "labor_rates.csv")
+    exp   = pd.read_csv(TASK / "expedite_fees.csv")
+    with open(TASK / "supplier_contracts.json") as fh:
+        ctrs = json.load(fh)
+    dlv   = pq.read_table(TASK / "delivery_performance.parquet").to_pandas()
+    # T5: must read only "operational_schedule" sheet; "historical_2023" is a decoy
+    sched = pd.read_excel(TASK / "production_schedule.xlsx",
+                          sheet_name="operational_schedule", dtype={"month": str})
+    return asm, comp, bom, inv, subs, pric, lab, exp, ctrs, dlv, sched
 
 
-def compute_exploded_requirements(assemblies, bom_structure, components):
-    requirements = explode_bom(assemblies, bom_structure)
-    
-    comp_info = {}
-    for _, row in components.iterrows():
-        comp_info[row["component_id"]] = {
-            "category": row["category"],
-            "unit_cost": row["unit_cost"],
-            "is_critical": row["is_critical"],
-        }
-    
+# ─── helpers ────────────────────────────────────────────────────────────────
+
+def get_contract_discount(ctrs, supplier_id, category):
+    """T2 + T6: sparse JSON keyed by supplier → category; date-range validity."""
+    sup = ctrs.get(supplier_id, {})
+    # T2: absent supplier+category → 0.0
+    cat_list = sup.get(category, None)
+    if cat_list is None:
+        return 0.0
+    # T6: find first date-range that brackets ANALYSIS_DATE (inclusive)
+    for entry in cat_list:
+        ef = datetime.strptime(entry["effective_from"], "%Y-%m-%d")
+        et = datetime.strptime(entry["effective_to"],   "%Y-%m-%d")
+        if ef <= ANALYSIS_DATE <= et:
+            return entry["discount_rate"]
+    return 0.0  # contract expired or not yet active
+
+
+def get_unit_price(pric_df, component_id, qty):
+    """tiered pricing; returns None when no row exists (covered FASTENER components)."""
+    mask = ((pric_df["component_id"] == component_id) &
+            (pric_df["min_qty"] <= qty) &
+            (pric_df["max_qty"] >= qty))
+    hits = pric_df[mask]
+    return float(hits.iloc[0]["unit_price"]) if not hits.empty else None
+
+
+def get_capacity_multiplier(sched, year_month, priority):
+    """T5: exact priority_scope match first; fall back to 'ALL' sentinel; else 1.0."""
+    month_rows = sched[sched["month"] == year_month]
+    exact = month_rows[month_rows["priority_scope"] == priority]
+    if not exact.empty:
+        return float(exact.iloc[0]["capacity_multiplier"])
+    sentinel = month_rows[month_rows["priority_scope"] == "ALL"]
+    if not sentinel.empty:
+        return float(sentinel.iloc[0]["capacity_multiplier"])
+    return 1.0
+
+
+def explode_bom(parent_id, demand, bom_df, depth=0):
+    """Recursive BOM explosion → {component_id: accumulated_gross_qty}."""
+    if depth > 10:
+        return {}
+    result = {}
+    for _, row in bom_df[bom_df["parent_id"] == parent_id].iterrows():
+        child = row["child_id"]
+        qty   = demand * float(row["quantity_per"]) * (1.0 + float(row["scrap_rate"]))
+        if child[:3] in ("CMP", "PRT", "MAT", "RAW"):
+            result[child] = result.get(child, 0.0) + qty
+        else:
+            for cid, cqty in explode_bom(child, qty, bom_df, depth + 1).items():
+                result[cid] = result.get(cid, 0.0) + cqty
+    return result
+
+
+# ─── step 1: supplier scorecard ─────────────────────────────────────────────
+
+def compute_supplier_scorecard(dlv):
+    """T4: trailing consecutive LATE count includes the most-recent delivery event."""
     rows = []
-    for comp_id, req in requirements.items():
-        if comp_id.startswith("SUB") or comp_id.startswith("MOD"):
-            continue
-        
-        total_qty = round(req["total_qty"], 2)
-        num_assemblies = len(set(s["assembly"] for s in req["sources"]))
-        max_level = max(s["level"] for s in req["sources"])
-        
-        info = comp_info.get(comp_id, {"category": "UNKNOWN", "unit_cost": 0.0})
-        category = info["category"]
-        unit_cost = info["unit_cost"]
-        
-        extended_cost = round(total_qty * unit_cost, 2)
-        
-        rows.append({
-            "component_id": comp_id,
-            "total_required_qty": total_qty,
-            "num_parent_assemblies": num_assemblies,
-            "deepest_level": max_level,
-            "category": category,
-            "unit_cost": round(unit_cost, 2),
-            "extended_cost": extended_cost,
-        })
-    
-    df = pd.DataFrame(rows)
-    df = df.sort_values("component_id").reset_index(drop=True)
-    return df
-
-
-def compute_material_shortages(exploded_requirements, inventory, substitutions, components):
-    inv_map = {}
-    for _, row in inventory.iterrows():
-        comp_id = row["component_id"]
-        available = row["on_hand_qty"] - row["allocated_qty"]
-        on_order = row["on_order_qty"] if pd.notna(row["on_order_qty"]) else 0
-        inv_map[comp_id] = {
-            "available": available,
-            "on_order": on_order,
-            "expected_date": row["expected_receipt_date"],
-        }
-    
-    sub_map = defaultdict(list)
-    for _, row in substitutions.iterrows():
-        if row["approval_status"] == "APPROVED":
-            # Only use substitutes valid on the analysis date
-            if str(row["effective_from"]) <= ANALYSIS_DATE <= str(row["effective_to"]):
-                sub_map[row["primary_component"]].append({
-                    "substitute": row["substitute_component"],
-                    "factor": row["conversion_factor"],
-                    "priority": row["priority_rank"],
-                })
-    
-    comp_info = {}
-    for _, row in components.iterrows():
-        comp_info[row["component_id"]] = {
-            "is_critical": row["is_critical"],
-            "default_supplier": row["default_supplier"],
-            "min_order_qty": row["min_order_qty"],
-            "unit_cost": row["unit_cost"],
-        }
-    
-    sub_pool = {comp_id: info["available"] for comp_id, info in inv_map.items()}
-    
-    rows = []
-    for _, req in exploded_requirements.iterrows():
-        comp_id = req["component_id"]
-        needed = req["total_required_qty"]
-        
-        inv = inv_map.get(comp_id, {"available": 0, "on_order": 0, "expected_date": ""})
-        available = inv["available"]
-        on_order = inv["on_order"]
-        
-        gross_shortage = round(max(0, needed - available), 2)
-        net_shortage = round(max(0, needed - available - on_order), 2)
-        
-        if gross_shortage <= 0:
-            continue
-        
-        substitute_id = ""
-        substitute_factor = 0.0
-        substitute_available = 0
-        substitute_can_cover = "NO"
-        
-        subs = sub_map.get(comp_id, [])
-        subs_sorted = sorted(subs, key=lambda x: x["priority"])
-        
-        for sub in subs_sorted:
-            sub_comp = sub["substitute"]
-            factor = sub["factor"]
-            sub_avail = sub_pool.get(sub_comp, 0)
-            
-            qty_needed_from_sub = round(gross_shortage * factor, 2)
-            
-            if sub_avail >= qty_needed_from_sub:
-                substitute_id = sub_comp
-                substitute_factor = factor
-                substitute_available = sub_avail
-                substitute_can_cover = "YES"
-                break
-            elif sub_avail > 0:
-                substitute_id = sub_comp
-                substitute_factor = factor
-                substitute_available = sub_avail
-                substitute_can_cover = "PARTIAL"
-        
-        if substitute_id and substitute_can_cover in ("YES", "PARTIAL"):
-            if substitute_can_cover == "YES":
-                sub_pool[substitute_id] = max(0, sub_pool.get(substitute_id, 0) - round(gross_shortage * substitute_factor, 2))
+    for sup_id, grp in dlv.sort_values("scheduled_date").groupby("supplier_id"):
+        statuses = grp["status"].tolist()
+        total    = len(statuses)
+        on_time  = sum(1 for s in statuses if s == "ON_TIME")
+        # T4 trap: count trailing LATE streak from the END (including last event)
+        consec = 0
+        for s in reversed(statuses):
+            if s == "LATE":
+                consec += 1
             else:
-                sub_pool[substitute_id] = 0
-        
-        info = comp_info.get(comp_id, {"is_critical": "NO"})
-        is_critical = info["is_critical"]
-
-        # Compute shortage_severity
-        if is_critical == "YES" and substitute_can_cover == "NO":
-            shortage_severity = "CRITICAL"
-        elif is_critical == "YES" and substitute_can_cover in ("YES", "PARTIAL"):
-            shortage_severity = "HIGH"
-        elif is_critical == "NO" and net_shortage >= 500:
-            shortage_severity = "HIGH"
-        elif is_critical == "NO" and net_shortage >= 100:
-            shortage_severity = "MEDIUM"
-        else:
-            shortage_severity = "LOW"
-
-        rows.append({
-            "component_id": comp_id,
-            "required_qty": round(needed, 2),
-            "available_qty": available,
-            "on_order_qty": on_order,
-            "gross_shortage": gross_shortage,
-            "net_shortage": net_shortage,
-            "is_critical": is_critical,
-            "substitute_id": substitute_id,
-            "substitute_factor": substitute_factor,
-            "substitute_available": substitute_available,
-            "substitute_can_cover": substitute_can_cover,
-            "shortage_severity": shortage_severity,
-        })
-    
-    df = pd.DataFrame(rows)
-    df = df.sort_values("component_id").reset_index(drop=True)
-    return df
-
-
-def compute_purchase_orders(material_shortages, components, suppliers, supplier_pricing):
-    comp_info = {}
-    for _, row in components.iterrows():
-        comp_info[row["component_id"]] = {
-            "default_supplier": row["default_supplier"],
-            "min_order_qty": row["min_order_qty"],
-            "unit_cost": row["unit_cost"],
-        }
-    
-    sup_info = {}
-    for _, row in suppliers.iterrows():
-        sup_info[row["supplier_id"]] = {
-            "base_lead_time": row["base_lead_time"],
-            "min_order_value": row["min_order_value"],
-        }
-    
-    pricing_map = defaultdict(list)
-    for _, row in supplier_pricing.iterrows():
-        key = (row["component_id"], row["supplier_id"])
-        pricing_map[key].append({
-            "min_qty": row["min_qty"],
-            "max_qty": row["max_qty"],
-            "unit_price": row["unit_price"],
-        })
-    
-    po_lines = defaultdict(list)
-    
-    for _, shortage in material_shortages.iterrows():
-        if shortage["net_shortage"] <= 0:
-            continue
-        
-        comp_id = shortage["component_id"]
-        needed_qty = shortage["net_shortage"]
-        
-        info = comp_info.get(comp_id, {"default_supplier": "SUP001", "min_order_qty": 1, "unit_cost": 0.0})
-        supplier_id = info["default_supplier"]
-        min_order = info["min_order_qty"]
-        
-        order_qty = int(math.ceil(max(needed_qty, 0.001) / min_order) * min_order)
-        
-        pricing_tiers = pricing_map.get((comp_id, supplier_id), [])
-        unit_price = info["unit_cost"]
-        
-        for tier in pricing_tiers:
-            if tier["min_qty"] <= order_qty <= tier["max_qty"]:
-                unit_price = tier["unit_price"]
                 break
-        
-        line_total = round(order_qty * unit_price, 2)
-        
-        sup = sup_info.get(supplier_id, {"base_lead_time": 30})
-        lead_time = sup["base_lead_time"]
-        
-        po_lines[supplier_id].append({
-            "component_id": comp_id,
-            "order_qty": int(order_qty),
-            "unit_price": round(unit_price, 2),
-            "line_total": line_total,
-            "lead_time": lead_time,
-        })
-    
-    rows = []
-    po_num = 1
-    for supplier_id, lines in po_lines.items():
-        sup = sup_info.get(supplier_id, {"min_order_value": 0})
-        min_order_value = sup["min_order_value"]
-        
-        total_value = sum(line["line_total"] for line in lines)
-        total_qty = sum(line["order_qty"] for line in lines)
-        max_lead = max(line["lead_time"] for line in lines)
-        num_lines = len(lines)
-        
-        meets_minimum = "YES" if total_value >= min_order_value else "NO"
-        
+        grp2 = grp.assign(
+            sched_dt  = pd.to_datetime(grp["scheduled_date"]),
+            actual_dt = pd.to_datetime(grp["actual_delivery_date"]),
+        )
+        grp2["delay"] = (grp2["actual_dt"] - grp2["sched_dt"]).dt.days
+        late_mask = grp2["status"] == "LATE"
+        avg_delay = round(float(grp2.loc[late_mask, "delay"].mean()), 2) if late_mask.any() else 0.0
         rows.append({
-            "po_number": f"PO{str(po_num).zfill(5)}",
-            "supplier_id": supplier_id,
-            "num_line_items": num_lines,
-            "total_qty": total_qty,
-            "total_value": round(total_value, 2),
-            "max_lead_time_days": max_lead,
-            "meets_minimum": meets_minimum,
-            "min_order_value": round(min_order_value, 2),
+            "supplier_id":            sup_id,
+            "total_deliveries":       total,
+            "on_time_deliveries":     on_time,
+            "reliability_score":      round(on_time / total, 4),
+            "consecutive_late_count": consec,
+            "average_delay_days":     avg_delay,
         })
-        po_num += 1
-    
-    df = pd.DataFrame(rows)
-    df = df.sort_values("supplier_id").reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("supplier_id").reset_index(drop=True)
+    df.to_csv(GT / "supplier_scorecard.csv", index=False)
     return df
 
 
-def compute_critical_path(assemblies, bom_structure, components, suppliers, production_calendar):
-    bom_dict = defaultdict(list)
-    for _, row in bom_structure.iterrows():
-        bom_dict[row["parent_id"]].append(row["child_id"])
-    
-    comp_info = {}
-    for _, row in components.iterrows():
-        comp_info[row["component_id"]] = {
-            "lead_time_days": row["lead_time_days"],
-            "default_supplier": row["default_supplier"],
-        }
-    
-    cal_map = {}
-    for _, row in production_calendar.iterrows():
-        cal_map[row["month"]] = row["capacity_multiplier"]
-    
-    lead_time_cache = {}
-    
-    def get_lead_time(item_id):
-        if item_id in lead_time_cache:
-            return lead_time_cache[item_id]
-        
-        children = bom_dict.get(item_id, [])
-        
-        if len(children) == 0:
-            info = comp_info.get(item_id, {"lead_time_days": 0})
-            lt = info["lead_time_days"]
-            lead_time_cache[item_id] = lt
-            return lt
-        
-        max_child_lt = 0
-        for child in children:
-            child_lt = get_lead_time(child)
-            max_child_lt = max(max_child_lt, child_lt)
-        
-        own_processing = 7
-        if item_id.startswith("SUB"):
-            own_processing = 5
-        elif item_id.startswith("ASM"):
-            own_processing = 10
-        
-        total_lt = max_child_lt + own_processing
-        lead_time_cache[item_id] = total_lt
-        return total_lt
-    
+# ─── step 2: exploded requirements ──────────────────────────────────────────
+
+def compute_exploded_requirements(asm, comp, bom, inv, pric, ctrs):
+    comp_idx = comp.set_index("component_id")
+    inv_idx  = inv.set_index("component_id")
     rows = []
-    for _, asm in assemblies.iterrows():
-        asm_id = asm["assembly_id"]
-        priority = asm["priority"]
-        due_date = asm["due_date"]
-        
-        total_lead_time = get_lead_time(asm_id)
-        
-        children = bom_dict.get(asm_id, [])
-        num_direct_children = len(children)
-        
-        critical_child = ""
-        critical_child_lt = 0
-        for child in children:
-            child_lt = get_lead_time(child)
-            if child_lt > critical_child_lt:
-                critical_child_lt = child_lt
-                critical_child = child
-        
-        buffer_days = 14 if priority == "CRITICAL" else 7
-        required_start_days = total_lead_time + buffer_days
-        
-        due_month = str(due_date)[:7]
-        capacity_mult = cal_map.get(due_month, 1.0)
-        capacity_adjusted_days = math.ceil(required_start_days / capacity_mult)
-        required_start_date = (pd.to_datetime(due_date) - pd.Timedelta(days=capacity_adjusted_days)).strftime("%Y-%m-%d")
-        
-        rows.append({
-            "assembly_id": asm_id,
-            "priority": priority,
-            "due_date": due_date,
-            "total_lead_time_days": total_lead_time,
-            "num_direct_children": num_direct_children,
-            "critical_path_child": critical_child,
-            "critical_child_lead_time": critical_child_lt,
-            "buffer_days": buffer_days,
-            "required_start_days": required_start_days,
-            "capacity_adjusted_days": capacity_adjusted_days,
-            "required_start_date": required_start_date,
-        })
-    
-    df = pd.DataFrame(rows)
-    df = df.sort_values("assembly_id").reset_index(drop=True)
+    for _, a in asm.iterrows():
+        asm_id = a["assembly_id"]
+        demand = int(a["demand_quantity"])
+        for cid, gross in explode_bom(asm_id, demand, bom).items():
+            gross    = round(gross, 6)
+            c        = comp_idx.loc[cid]
+            sup_id   = str(c["default_supplier"])
+            category = str(c["category"])
+            unit_cost = float(c["unit_cost"])
+            on_hand   = float(inv_idx.loc[cid, "on_hand_qty"])  if cid in inv_idx.index else 0.0
+            alloc     = float(inv_idx.loc[cid, "allocated_qty"]) if cid in inv_idx.index else 0.0
+            available = max(0.0, on_hand - alloc)
+            net_qty   = max(0.0, gross - available)
+            # tiered price at gross_qty (fallback: unit_cost for covered FASTENERs with no pricing)
+            price    = get_unit_price(pric, cid, max(1, math.ceil(gross)))
+            if price is None:
+                price = unit_cost
+            # T2 + T6
+            discount   = get_contract_discount(ctrs, sup_id, category)
+            disc_price = round(price * (1.0 - discount), 6)
+            rows.append({
+                "assembly_id":          asm_id,
+                "component_id":         cid,
+                "demand_qty":           demand,
+                "gross_qty_required":   round(gross, 4),
+                "net_qty_required":     round(net_qty, 4),
+                "unit_price":           round(price, 4),
+                "contract_discount":    discount,
+                "discounted_unit_price": round(disc_price, 4),
+            })
+    df = (pd.DataFrame(rows)
+            .sort_values(["assembly_id", "component_id"])
+            .reset_index(drop=True))
+    df.to_csv(GT / "exploded_requirements.csv", index=False)
     return df
 
 
-def compute_cost_rollup(assemblies, bom_structure, components, labor_rates):
-    bom_dict = defaultdict(list)
-    for _, row in bom_structure.iterrows():
-        bom_dict[row["parent_id"]].append({
-            "child_id": row["child_id"],
-            "quantity_per": row["quantity_per"],
-            "scrap_rate": row["scrap_rate"] if pd.notna(row["scrap_rate"]) else 0.0,
+# ─── step 3: material shortages ─────────────────────────────────────────────
+
+def compute_material_shortages(expl_df, subs, inv, comp):
+    inv_idx  = inv.set_index("component_id")
+    comp_idx = comp.set_index("component_id")
+    # build substitute coverage per primary component (APPROVED subs only)
+    sub_cov = {}
+    for _, s in subs.iterrows():
+        if s["approval_status"] != "APPROVED":
+            continue
+        prim    = s["primary_component"]
+        sub_c   = s["substitute_component"]
+        sub_oh  = float(inv_idx.loc[sub_c, "on_hand_qty"]) if sub_c in inv_idx.index else 0.0
+        cf      = float(s["conversion_factor"])
+        eff     = sub_oh / cf if cf > 0 else 0.0
+        sub_cov[prim] = sub_cov.get(prim, 0.0) + eff
+    rows = []
+    for _, req in expl_df.iterrows():
+        net = float(req["net_qty_required"])
+        if net < 1e-6:
+            continue
+        cid       = req["component_id"]
+        avail_sub = round(sub_cov.get(cid, 0.0), 2)
+        covered   = "YES" if avail_sub >= net else "NO"
+        is_crit   = str(comp_idx.loc[cid, "is_critical"]) if cid in comp_idx.index else "NO"
+        severity  = "CRITICAL" if is_crit == "YES" or net > 50.0 else "STANDARD"
+        rows.append({
+            "assembly_id":             req["assembly_id"],
+            "component_id":            cid,
+            "net_qty_required":        round(net, 4),
+            "available_substitute_qty": avail_sub,
+            "shortage_covered":        covered,
+            "shortage_severity":       severity,
         })
-    
-    comp_info = {}
-    for _, row in components.iterrows():
-        comp_info[row["component_id"]] = {
-            "unit_cost": row["unit_cost"],
-            "category": row["category"],
-        }
-    
-    labor_info = {}
-    for _, row in labor_rates.iterrows():
-        labor_info[row["category"]] = {
-            "labor_rate_per_hour": row["labor_rate_per_hour"],
-            "run_hours_per_unit": row["run_hours_per_unit"],
-            "overhead_rate": row["overhead_rate"],
-        }
-    
-    cost_cache = {}
-    
-    def get_cost(item_id):
-        if item_id in cost_cache:
-            return cost_cache[item_id]
-        
-        children = bom_dict.get(item_id, [])
-        
-        if len(children) == 0:
-            info = comp_info.get(item_id, {"unit_cost": 0.0, "category": "STRUCTURAL"})
-            mat_cost = info["unit_cost"]
-            category = info["category"]
-            
-            labor = labor_info.get(category, {"labor_rate_per_hour": 50.0, "run_hours_per_unit": 0.5, "overhead_rate": 1.5})
-            labor_rate = labor["labor_rate_per_hour"]
-            run_hours = labor["run_hours_per_unit"]
-            overhead_rate = labor["overhead_rate"]
-            
-            labor_cost = round(labor_rate * run_hours, 2)
-            overhead_cost = round(labor_cost * (overhead_rate - 1), 2)
-            
-            total = round(mat_cost + labor_cost + overhead_cost, 2)
-            cost_cache[item_id] = {
-                "material": mat_cost,
-                "labor": labor_cost,
-                "overhead": overhead_cost,
-                "total": total,
-            }
-            return cost_cache[item_id]
-        
-        total_material = 0.0
-        total_labor = 0.0
-        total_overhead = 0.0
-        
-        for child in children:
-            child_id = child["child_id"]
-            qty = child["quantity_per"]
-            scrap = child["scrap_rate"]
-            adj_qty = qty * (1 + scrap)
-            
-            child_cost = get_cost(child_id)
-            total_material += round(child_cost["total"] * adj_qty, 2)
-        
-        if item_id.startswith("SUB"):
-            labor_add = 25.0
-            overhead_add = 12.5
-        elif item_id.startswith("ASM"):
-            labor_add = 75.0
-            overhead_add = 37.5
+    df = (pd.DataFrame(rows)
+            .sort_values(["assembly_id", "component_id"])
+            .reset_index(drop=True))
+    df.to_csv(GT / "material_shortages.csv", index=False)
+    return df
+
+
+# ─── step 4: purchase orders ────────────────────────────────────────────────
+
+def compute_purchase_orders(shortages_df, comp, pric, exp_df, scorecard_df):
+    """T1 (no PO for covered shortages), T3 (tier at qty_ordered), T4, T7."""
+    comp_idx  = comp.set_index("component_id")
+    exp_idx   = exp_df.set_index("supplier_id")
+    sc_idx    = scorecard_df.set_index("supplier_id")
+    rows = []
+    for _, s in shortages_df.iterrows():
+        # T1: skip shortages covered by substitution
+        if s["shortage_covered"] == "YES":
+            continue
+        cid       = s["component_id"]
+        net_qty   = float(s["net_qty_required"])
+        c         = comp_idx.loc[cid]
+        sup_id    = str(c["default_supplier"])
+        moq       = int(c["min_order_qty"])
+        base_lead = int(c["lead_time_days"])
+        qty_ord   = math.ceil(max(net_qty, moq))
+        # T3: tiered price at qty_ordered
+        price = get_unit_price(pric, cid, qty_ord)
+        if price is None:
+            price = float(c["unit_cost"])
+        po_value = round(qty_ord * price, 4)
+        # T7: double-cap expedite fee
+        if sup_id in exp_idx.index:
+            pct     = float(exp_idx.loc[sup_id, "expedite_pct"])
+            max_fee = float(exp_idx.loc[sup_id, "max_expedite_fee"])
+            exp_fee = round(min(po_value * pct, max_fee), 4)
         else:
-            labor_add = 10.0
-            overhead_add = 5.0
-        
-        total_material = round(total_material, 2)
-        total_labor = round(labor_add, 2)
-        total_overhead = round(overhead_add, 2)
-        total = round(total_material + total_labor + total_overhead, 2)
-        
-        cost_cache[item_id] = {
-            "material": total_material,
-            "labor": total_labor,
-            "overhead": total_overhead,
-            "total": total,
-        }
-        return cost_cache[item_id]
-    
-    rows = []
-    for _, asm in assemblies.iterrows():
-        asm_id = asm["assembly_id"]
-        demand = asm["demand_quantity"]
-        
-        unit_cost = get_cost(asm_id)
-        
-        extended_material = round(unit_cost["material"] * demand, 2)
-        extended_labor = round(unit_cost["labor"] * demand, 2)
-        extended_overhead = round(unit_cost["overhead"] * demand, 2)
-        extended_total = round(unit_cost["total"] * demand, 2)
-        
-        margin_rate = 0.15
-        margin_amount = round(extended_total * margin_rate, 2)
-        selling_price = round(extended_total + margin_amount, 2)
-        
+            exp_fee = 0.0
+        # T4: trailing consecutive LATE stretch → lead time inflation
+        consec   = int(sc_idx.loc[sup_id, "consecutive_late_count"]) if sup_id in sc_idx.index else 0
+        adj_lead = math.ceil(base_lead * (1.0 + 0.1 * consec))
         rows.append({
-            "assembly_id": asm_id,
-            "demand_quantity": demand,
-            "unit_material_cost": round(unit_cost["material"], 2),
-            "unit_labor_cost": round(unit_cost["labor"], 2),
-            "unit_overhead_cost": round(unit_cost["overhead"], 2),
-            "unit_total_cost": round(unit_cost["total"], 2),
-            "extended_material": extended_material,
-            "extended_labor": extended_labor,
-            "extended_overhead": extended_overhead,
-            "extended_total": extended_total,
-            "margin_rate": margin_rate,
-            "margin_amount": margin_amount,
-            "selling_price": selling_price,
+            "assembly_id":            s["assembly_id"],
+            "component_id":           cid,
+            "supplier_id":            sup_id,
+            "qty_ordered":            qty_ord,
+            "unit_price":             round(price, 4),
+            "po_value":               po_value,
+            "expedite_fee":           exp_fee,
+            "base_lead_time":         base_lead,
+            "adjusted_lead_time":     adj_lead,
+            "consecutive_late_count": consec,
+            "reliability_adjusted":   "YES" if consec > 0 else "NO",
         })
-    
-    df = pd.DataFrame(rows)
-    df = df.sort_values("assembly_id").reset_index(drop=True)
+    df = (pd.DataFrame(rows)
+            .sort_values(["assembly_id", "component_id"])
+            .reset_index(drop=True))
+    df.to_csv(GT / "purchase_orders.csv", index=False)
     return df
 
 
-def main():
-    base_dir = Path(__file__).parent
-    task_dir = base_dir.parent / "task"
-    
-    data = load_data(task_dir)
-    assemblies, components, bom_structure, suppliers, inventory, substitutions, supplier_pricing, production_calendar, labor_rates = data
-    
-    exploded = compute_exploded_requirements(assemblies, bom_structure, components)
-    exploded.to_csv(task_dir / "exploded_requirements.csv", index=False)
-    
-    shortages = compute_material_shortages(exploded, inventory, substitutions, components)
-    shortages.to_csv(task_dir / "material_shortages.csv", index=False)
-    
-    purchase_orders = compute_purchase_orders(shortages, components, suppliers, supplier_pricing)
-    purchase_orders.to_csv(task_dir / "purchase_orders.csv", index=False)
-    
-    critical_path = compute_critical_path(assemblies, bom_structure, components, suppliers, production_calendar)
-    critical_path.to_csv(task_dir / "critical_path_analysis.csv", index=False)
-    
-    cost_rollup = compute_cost_rollup(assemblies, bom_structure, components, labor_rates)
-    cost_rollup.to_csv(task_dir / "cost_rollup.csv", index=False)
-    
-    print(f"exploded_requirements.csv: {len(exploded)} rows")
-    print(f"material_shortages.csv: {len(shortages)} rows")
-    print(f"purchase_orders.csv: {len(purchase_orders)} rows")
-    print(f"critical_path_analysis.csv: {len(critical_path)} rows")
-    print(f"cost_rollup.csv: {len(cost_rollup)} rows")
+# ─── step 5: cost rollup ────────────────────────────────────────────────────
 
+def compute_cost_rollup(asm, expl_df, comp, lab, sched):
+    """T5: capacity_multiplier from schedule affects effective_material_cost."""
+    comp_idx = comp.set_index("component_id")
+    lab_idx  = lab.set_index("category")
+    rows = []
+    for _, a in asm.iterrows():
+        asm_id   = a["assembly_id"]
+        demand   = int(a["demand_quantity"])
+        month    = str(a["due_date"])[:7]          # "YYYY-MM"
+        priority = str(a["priority"])
+        cap_mult = get_capacity_multiplier(sched, month, priority)
+        asm_reqs = expl_df[expl_df["assembly_id"] == asm_id]
+        mat_cost = disc_mat = lab_cost = 0.0
+        for _, req in asm_reqs.iterrows():
+            cid   = req["component_id"]
+            gross = float(req["gross_qty_required"])
+            mat_cost += gross * float(req["unit_price"])
+            disc_mat += gross * float(req["discounted_unit_price"])
+            cat = str(comp_idx.loc[cid, "category"]) if cid in comp_idx.index else None
+            if cat and cat in lab_idx.index:
+                lr       = lab_idx.loc[cat]
+                lab_cost += gross * float(lr["run_hours_per_unit"]) * \
+                            float(lr["labor_rate_per_hour"]) * float(lr["overhead_rate"])
+        eff_mat = round(disc_mat * cap_mult, 4)
+        rows.append({
+            "assembly_id":               asm_id,
+            "demand_qty":                demand,
+            "capacity_multiplier":       cap_mult,
+            "material_cost":             round(mat_cost,  4),
+            "discounted_material_cost":  round(disc_mat,  4),
+            "effective_material_cost":   eff_mat,
+            "labor_cost":                round(lab_cost,  4),
+            "total_cost":                round(eff_mat + lab_cost, 4),
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(GT / "cost_rollup.csv", index=False)
+    return df
+
+
+# ─── entry point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    (asm, comp, bom, inv, subs, pric, lab, exp, ctrs, dlv, sched) = load_inputs()
+    scorecard  = compute_supplier_scorecard(dlv)
+    expl       = compute_exploded_requirements(asm, comp, bom, inv, pric, ctrs)
+    shortages  = compute_material_shortages(expl, subs, inv, comp)
+    pos        = compute_purchase_orders(shortages, comp, pric, exp, scorecard)
+    rollup     = compute_cost_rollup(asm, expl, comp, lab, sched)
+    print(f"supplier_scorecard.csv:      {len(scorecard)} rows")
+    print(f"exploded_requirements.csv:   {len(expl)} rows")
+    print(f"material_shortages.csv:      {len(shortages)} rows")
+    print(f"purchase_orders.csv:         {len(pos)} rows")
+    print(f"cost_rollup.csv:             {len(rollup)} rows")

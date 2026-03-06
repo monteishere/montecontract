@@ -1,0 +1,13 @@
+supplier_id,total_deliveries,on_time_deliveries,reliability_score,consecutive_late_count,average_delay_days
+SUP001,5,3,0.6,1,6.5
+SUP002,4,2,0.5,0,6.5
+SUP003,4,2,0.5,0,7.5
+SUP004,4,3,0.75,0,9.0
+SUP005,5,2,0.4,0,11.67
+SUP006,4,1,0.25,1,7.33
+SUP007,4,1,0.25,3,9.0
+SUP008,4,1,0.25,2,7.67
+SUP009,4,3,0.75,0,9.0
+SUP010,5,1,0.2,4,8.0
+SUP011,5,2,0.4,0,10.67
+SUP012,5,4,0.8,0,11.0

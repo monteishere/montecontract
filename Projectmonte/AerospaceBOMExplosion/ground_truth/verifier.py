@@ -1,385 +1,479 @@
+#!/usr/bin/env python3
+"""
+Verifier — AerospaceBOMExplosion V2
+Usage:  python verifier.py <solution_dir>
+
+Validates 5 output files against golden values.
+Traps tested:
+  T1 - Cascade Kill Zone
+  T2 - Silent NaN Default
+  T3 - Cross-Output Consistency
+  T4 - Prior-Streak Off-By-One
+  T5 - Dual-Key OR Sentinel (production_schedule XLSX)
+  T6 - Date-Range Rate Lookup
+  T7 - Double Cap Credit
+"""
+import sys, math
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import sys
 
-PASS = 0
-FAIL = 0
+SOL = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
+GT  = Path(__file__).parent
 
+FASTENER_COVERED = {
+    "RAW00059","CMP00060","PRT00061","MAT00062",
+    "RAW00063","CMP00064","PRT00065","MAT00066",
+}
 
-def check(condition, msg):
-    global PASS, FAIL
-    if condition:
-        PASS += 1
-        print(f"[PASS] {msg}")
-    else:
-        FAIL += 1
-        print(f"[FAIL] {msg}")
+errors = []
 
+def err(code, msg):
+    errors.append(f"[{code}] {msg}")
 
-def load_csv(path, name):
+def near(a, b, tol=0.05):
+    """Relative or absolute tolerance check."""
+    if b == 0:
+        return abs(a) <= tol
+    return abs(a - b) / max(abs(b), 1e-9) <= tol
+
+def load(path, name):
     try:
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
     except Exception as e:
-        check(False, f"{name} could not be loaded: {e}")
-        return None
+        err("FILE", f"{name} could not be loaded: {e}")
+        return pd.DataFrame()
+
+# ─── load files ─────────────────────────────────────────────────────────────
+
+sc  = load(SOL / "supplier_scorecard.csv",      "supplier_scorecard.csv")           # C1
+er  = load(SOL / "exploded_requirements.csv",   "exploded_requirements.csv")         # C2
+sh  = load(SOL / "material_shortages.csv",      "material_shortages.csv")            # C3
+po  = load(SOL / "purchase_orders.csv",         "purchase_orders.csv")               # C4
+cr  = load(SOL / "cost_rollup.csv",             "cost_rollup.csv")                   # C5
+
+# Load golden
+g_sc = pd.read_csv(GT / "supplier_scorecard.csv")
+g_er = pd.read_csv(GT / "exploded_requirements.csv")
+g_sh = pd.read_csv(GT / "material_shortages.csv")
+g_po = pd.read_csv(GT / "purchase_orders.csv")
+g_cr = pd.read_csv(GT / "cost_rollup.csv")
+task = Path(__file__).parent.parent / "task"
+exp  = pd.read_csv(task / "expedite_fees.csv").set_index("supplier_id")
 
 
-def verify_exploded_requirements(student_df, golden_df):
-    check(student_df is not None, "exploded_requirements.csv exists and loaded")
-    if student_df is None:
-        return
-    
-    required_cols = ["component_id", "total_required_qty", "num_parent_assemblies", 
-                     "deepest_level", "category", "unit_cost", "extended_cost"]
-    for col in required_cols:
-        check(col in student_df.columns, f"exploded_requirements has column '{col}'")
-    
-    check(len(student_df) == len(golden_df), 
-          f"exploded_requirements row count matches ({len(student_df)} == {len(golden_df)})")
-    
-    golden_comps = set(golden_df["component_id"])
-    student_comps = set(student_df["component_id"])
-    check(golden_comps == student_comps, "exploded_requirements component_id set matches")
-    
-    merged = pd.merge(student_df, golden_df, on="component_id", suffixes=("_s", "_g"))
-    
-    qty_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["total_required_qty_s"] - row["total_required_qty_g"]) <= 0.01:
-            qty_match += 1
-    
-    pct = (qty_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(pct >= 95, f"exploded_requirements total_required_qty >95% match ({pct:.1f}%)")
-    check(pct >= 98, f"exploded_requirements total_required_qty >98% match ({pct:.1f}%)")
-    
-    cost_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["extended_cost_s"] - row["extended_cost_g"]) < 1.0:
-            cost_match += 1
-    
-    cost_pct = (cost_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(cost_pct >= 95, f"exploded_requirements extended_cost >95% match ({cost_pct:.1f}%)")
-    
-    comp_with_multiple = len(merged[merged["num_parent_assemblies_g"] > 1])
-    check(comp_with_multiple > 5, f"exploded_requirements has components with multi-parent ({comp_with_multiple} > 5)")
-    
-    deep_levels = len(merged[merged["deepest_level_g"] > 2])
-    check(deep_levels > 3, f"exploded_requirements has deep BOM levels ({deep_levels} > 3)")
+# ─── helper: lookup golden value ────────────────────────────────────────────
+
+def get_df_val(df, filter_col, filter_val, target_col, default=None):
+    rows = df[df[filter_col] == filter_val]
+    if rows.empty or target_col not in rows.columns:
+        return default
+    return rows.iloc[0][target_col]
+
+def get_df_val2(df, c1, v1, c2, v2, target_col, default=None):
+    rows = df[(df[c1] == v1) & (df[c2] == v2)]
+    if rows.empty or target_col not in rows.columns:
+        return default
+    return rows.iloc[0][target_col]
 
 
-def verify_material_shortages(student_df, golden_df, exploded_df):
-    check(student_df is not None, "material_shortages.csv exists and loaded")
-    if student_df is None:
-        return
-    
-    required_cols = ["component_id", "required_qty", "available_qty", "on_order_qty",
-                     "gross_shortage", "net_shortage", "is_critical", "substitute_id",
-                     "substitute_factor", "substitute_available", "substitute_can_cover",
-                     "shortage_severity"]
-    for col in required_cols:
-        check(col in student_df.columns, f"material_shortages has column '{col}'")
-    
-    check(len(student_df) == len(golden_df),
-          f"material_shortages row count matches ({len(student_df)} == {len(golden_df)})")
-    
-    check(len(student_df) < len(exploded_df), 
-          "material_shortages is subset of exploded (only includes shortages)")
-    
-    merged = pd.merge(student_df, golden_df, on="component_id", suffixes=("_s", "_g"))
-    
-    gross_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["gross_shortage_s"] - row["gross_shortage_g"]) < 0.1:
-            gross_match += 1
-    
-    gross_pct = (gross_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(gross_pct >= 90, f"material_shortages gross_shortage >90% match ({gross_pct:.1f}%)")
-    
-    net_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["net_shortage_s"] - row["net_shortage_g"]) < 0.1:
-            net_match += 1
-    
-    net_pct = (net_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(net_pct >= 90, f"material_shortages net_shortage >90% match ({net_pct:.1f}%)")
-    
-    with_subs = len(merged[(merged["substitute_id_g"].notna()) & (merged["substitute_id_g"] != "")])
-    check(with_subs > 0, f"material_shortages has items with substitutes ({with_subs} > 0)")
-    
-    sub_avail_match = 0
-    for _, row in merged.iterrows():
-        if abs(float(row["substitute_available_s"]) - float(row["substitute_available_g"])) < 0.5:
-            sub_avail_match += 1
-    sub_avail_pct = (sub_avail_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(sub_avail_pct >= 90, f"material_shortages substitute_available >90% match ({sub_avail_pct:.1f}%)")
-    
-    sub_match = 0
-    for _, row in merged.iterrows():
-        s = str(row.get("substitute_can_cover_s", ""))
-        g = str(row.get("substitute_can_cover_g", ""))
-        if s == g:
-            sub_match += 1
-    
-    sub_pct = (sub_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(sub_pct >= 95, f"material_shortages substitute_can_cover >95% match ({sub_pct:.1f}%)")
-    
-    severity_match = 0
-    for _, row in merged.iterrows():
-        if str(row.get("shortage_severity_s", "")) == str(row.get("shortage_severity_g", "")):
-            severity_match += 1
-    severity_pct = (severity_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(severity_pct >= 90, f"material_shortages shortage_severity >90% match ({severity_pct:.1f}%)")
-    check(severity_pct >= 95, f"material_shortages shortage_severity >95% match ({severity_pct:.1f}%)")
-    
-    critical_rows = merged[merged["is_critical_g"] == "YES"]
-    check(len(critical_rows) > 0, "material_shortages has critical items")
+# ===== SECTION 1: SCHEMA =====
+
+req_cols = {
+    "supplier_scorecard.csv":    ["supplier_id","total_deliveries","on_time_deliveries",
+                                   "reliability_score","consecutive_late_count","average_delay_days"],
+    "exploded_requirements.csv": ["assembly_id","component_id","demand_qty","gross_qty_required",
+                                   "net_qty_required","unit_price","contract_discount","discounted_unit_price"],
+    "material_shortages.csv":    ["assembly_id","component_id","net_qty_required",
+                                   "available_substitute_qty","shortage_covered","shortage_severity"],
+    "purchase_orders.csv":       ["assembly_id","component_id","supplier_id","qty_ordered",
+                                   "unit_price","po_value","expedite_fee","base_lead_time",
+                                   "adjusted_lead_time","consecutive_late_count","reliability_adjusted"],
+    "cost_rollup.csv":           ["assembly_id","demand_qty","capacity_multiplier",
+                                   "material_cost","discounted_material_cost",
+                                   "effective_material_cost","labor_cost","total_cost"],
+}
+for fname, cols in req_cols.items():
+    df = {"supplier_scorecard.csv":sc,"exploded_requirements.csv":er,
+          "material_shortages.csv":sh,"purchase_orders.csv":po,"cost_rollup.csv":cr}[fname]
+    for col in cols:
+        if df.empty:
+            break
+        if col not in df.columns:
+            err("SCHEMA", f"{fname} missing column '{col}'")
 
 
-def verify_purchase_orders(student_df, golden_df):
-    check(student_df is not None, "purchase_orders.csv exists and loaded")
-    if student_df is None:
-        return
-    
-    required_cols = ["po_number", "supplier_id", "num_line_items", "total_qty",
-                     "total_value", "max_lead_time_days", "meets_minimum", "min_order_value"]
-    for col in required_cols:
-        check(col in student_df.columns, f"purchase_orders has column '{col}'")
-    
-    check(len(student_df) == len(golden_df),
-          f"purchase_orders row count matches ({len(student_df)} == {len(golden_df)})")
-    
-    golden_suppliers = set(golden_df["supplier_id"])
-    student_suppliers = set(student_df["supplier_id"])
-    check(golden_suppliers == student_suppliers, "purchase_orders supplier_id set matches")
-    
-    merged = pd.merge(student_df, golden_df, on="supplier_id", suffixes=("_s", "_g"))
-    
-    value_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["total_value_s"] - row["total_value_g"]) < 1.0:
-            value_match += 1
-    
-    val_pct = (value_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(val_pct >= 90, f"purchase_orders total_value >90% match ({val_pct:.1f}%)")
-    
-    po_num_match = 0
-    for _, row in merged.iterrows():
-        if str(row.get("po_number_s", "")) == str(row.get("po_number_g", "")):
-            po_num_match += 1
-    po_num_pct = (po_num_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(po_num_pct >= 90, f"purchase_orders po_number assignment >90% match ({po_num_pct:.1f}%)")
-    check(po_num_pct == 100, f"purchase_orders po_number assignment 100% match ({po_num_pct:.1f}%)")
-    
-    lines_match = 0
-    for _, row in merged.iterrows():
-        if row["num_line_items_s"] == row["num_line_items_g"]:
-            lines_match += 1
-    
-    lines_pct = (lines_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(lines_pct >= 90, f"purchase_orders num_line_items >90% match ({lines_pct:.1f}%)")
-    
-    meets_match = 0
-    for _, row in merged.iterrows():
-        if row["meets_minimum_s"] == row["meets_minimum_g"]:
-            meets_match += 1
-    
-    meets_pct = (meets_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(meets_pct >= 90, f"purchase_orders meets_minimum >90% match ({meets_pct:.1f}%)")
+# ===== SECTION 2: ROW COUNTS =====
+
+def chk_rows(df, name, expected, tolerance=20):
+    n = len(df)
+    if abs(n - expected) > tolerance:
+        err("ROWS", f"{name} has {n} rows; expected ~{expected}")
+
+if not sc.empty:  chk_rows(sc, "supplier_scorecard", 12, 0)
+if not er.empty:  chk_rows(er, "exploded_requirements", 165, 30)
+if not sh.empty:  chk_rows(sh, "material_shortages", 126, 30)
+if not po.empty:  chk_rows(po, "purchase_orders", 109, 30)
+if not cr.empty:  chk_rows(cr, "cost_rollup", 12, 0)
 
 
-def verify_critical_path(student_df, golden_df):
-    check(student_df is not None, "critical_path_analysis.csv exists and loaded")
-    if student_df is None:
-        return
-    
-    required_cols = ["assembly_id", "priority", "due_date", "total_lead_time_days",
-                     "num_direct_children", "critical_path_child", "critical_child_lead_time",
-                     "buffer_days", "required_start_days", "capacity_adjusted_days", "required_start_date"]
-    for col in required_cols:
-        check(col in student_df.columns, f"critical_path_analysis has column '{col}'")
-    
-    check(len(student_df) == len(golden_df),
-          f"critical_path_analysis row count matches ({len(student_df)} == {len(golden_df)})")
-    
-    merged = pd.merge(student_df, golden_df, on="assembly_id", suffixes=("_s", "_g"))
-    
-    lt_match = 0
-    for _, row in merged.iterrows():
-        if row["total_lead_time_days_s"] == row["total_lead_time_days_g"]:
-            lt_match += 1
-    
-    lt_pct = (lt_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(lt_pct >= 80, f"critical_path total_lead_time_days >80% match ({lt_pct:.1f}%)")
-    check(lt_pct >= 95, f"critical_path total_lead_time_days >95% match ({lt_pct:.1f}%)")
-    
-    crit_match = 0
-    for _, row in merged.iterrows():
-        if row["critical_path_child_s"] == row["critical_path_child_g"]:
-            crit_match += 1
-    
-    crit_pct = (crit_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(crit_pct >= 80, f"critical_path critical_path_child >80% match ({crit_pct:.1f}%)")
-    
-    buf_match = 0
-    for _, row in merged.iterrows():
-        if row["buffer_days_s"] == row["buffer_days_g"]:
-            buf_match += 1
-    
-    buf_pct = (buf_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(buf_pct == 100, f"critical_path buffer_days 100% match ({buf_pct:.1f}%)")
-    
-    start_match = 0
-    for _, row in merged.iterrows():
-        if row["required_start_days_s"] == row["required_start_days_g"]:
-            start_match += 1
-    
-    start_pct = (start_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(start_pct >= 90, f"critical_path required_start_days >90% match ({start_pct:.1f}%)")
-    
-    adj_match = 0
-    for _, row in merged.iterrows():
-        if row["capacity_adjusted_days_s"] == row["capacity_adjusted_days_g"]:
-            adj_match += 1
-    
-    adj_pct = (adj_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(adj_pct >= 80, f"critical_path capacity_adjusted_days >80% match ({adj_pct:.1f}%)")
-    check(adj_pct == 100, f"critical_path capacity_adjusted_days 100% match ({adj_pct:.1f}%)")
-    
-    rsd_match = 0
-    for _, row in merged.iterrows():
-        if str(row["required_start_date_s"]) == str(row["required_start_date_g"]):
-            rsd_match += 1
-    
-    rsd_pct = (rsd_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(rsd_pct >= 80, f"critical_path required_start_date >80% match ({rsd_pct:.1f}%)")
-    check(rsd_pct == 100, f"critical_path required_start_date 100% match ({rsd_pct:.1f}%)")
+# ===== SECTION 3: SUPPLIER SCORECARD — T4 =====
+
+if not sc.empty and "supplier_id" in sc.columns and "consecutive_late_count" in sc.columns:
+    sc_idx = sc.set_index("supplier_id")
+
+    # T4 — trailing LATE streak (must include last event, not exclude it)
+    T4_EXPECTED = {
+        "SUP001": 1, "SUP002": 0, "SUP003": 0, "SUP004": 0,
+        "SUP005": 0, "SUP006": 1, "SUP007": 3, "SUP008": 2,
+        "SUP009": 0, "SUP010": 4, "SUP011": 0, "SUP012": 0,
+    }
+    for sup, expected_consec in T4_EXPECTED.items():
+        if sup in sc_idx.index:
+            got = int(sc_idx.loc[sup, "consecutive_late_count"])
+            if got != expected_consec:
+                err("T4", f"{sup} consecutive_late_count={got}, expected {expected_consec}")
+        else:
+            err("T4", f"{sup} missing from supplier_scorecard")
+
+    # reliability_score range
+    if "reliability_score" in sc.columns:
+        bad = sc[(sc["reliability_score"] < 0) | (sc["reliability_score"] > 1)]
+        if len(bad):
+            err("SC", f"{len(bad)} rows have reliability_score outside [0,1]")
+
+    # specific reliability spot-checks
+    REL = {"SUP010": 0.20, "SUP012": 0.80, "SUP001": 0.60}
+    for sup, expected_rel in REL.items():
+        if sup in sc_idx.index:
+            got = float(sc_idx.loc[sup, "reliability_score"])
+            if not near(got, expected_rel, 0.01):
+                err("SC", f"{sup} reliability_score={got:.4f}, expected {expected_rel}")
+
+    # total_deliveries spot-checks
+    TOTALS = {"SUP001": 5, "SUP010": 5, "SUP012": 5, "SUP002": 4}
+    for sup, expected_total in TOTALS.items():
+        if sup in sc_idx.index:
+            got = int(sc_idx.loc[sup, "total_deliveries"])
+            if got != expected_total:
+                err("SC", f"{sup} total_deliveries={got}, expected {expected_total}")
+
+    # average_delay_days > 0 for suppliers with LATE deliveries
+    for sup in ["SUP001","SUP007","SUP008","SUP010"]:
+        if sup in sc_idx.index and "average_delay_days" in sc.columns:
+            v = float(sc_idx.loc[sup, "average_delay_days"])
+            if v <= 0:
+                err("SC", f"{sup} average_delay_days={v}, expected > 0")
 
 
-def verify_cost_rollup(student_df, golden_df):
-    check(student_df is not None, "cost_rollup.csv exists and loaded")
-    if student_df is None:
-        return
-    
-    required_cols = ["assembly_id", "demand_quantity", "unit_material_cost", "unit_labor_cost",
-                     "unit_overhead_cost", "unit_total_cost", "extended_material", "extended_labor",
-                     "extended_overhead", "extended_total", "margin_rate", "margin_amount", "selling_price"]
-    for col in required_cols:
-        check(col in student_df.columns, f"cost_rollup has column '{col}'")
-    
-    check(len(student_df) == len(golden_df),
-          f"cost_rollup row count matches ({len(student_df)} == {len(golden_df)})")
-    
-    merged = pd.merge(student_df, golden_df, on="assembly_id", suffixes=("_s", "_g"))
-    
-    mat_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["unit_material_cost_s"] - row["unit_material_cost_g"]) < 0.50:
-            mat_match += 1
-    
-    mat_pct = (mat_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(mat_pct >= 90, f"cost_rollup unit_material_cost >90% match ({mat_pct:.1f}%)")
-    
-    total_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["unit_total_cost_s"] - row["unit_total_cost_g"]) < 0.50:
-            total_match += 1
-    
-    total_pct = (total_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(total_pct >= 90, f"cost_rollup unit_total_cost >90% match ({total_pct:.1f}%)")
-    
-    ext_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["extended_total_s"] - row["extended_total_g"]) < 2.0:
-            ext_match += 1
-    
-    ext_pct = (ext_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(ext_pct >= 95, f"cost_rollup extended_total >95% match ({ext_pct:.1f}%)")
-    
-    sell_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["selling_price_s"] - row["selling_price_g"]) < 5.0:
-            sell_match += 1
-    
-    sell_pct = (sell_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(sell_pct >= 95, f"cost_rollup selling_price >95% match ({sell_pct:.1f}%)")
-    
-    margin_match = 0
-    for _, row in merged.iterrows():
-        if abs(row["margin_rate_s"] - row["margin_rate_g"]) < 0.001:
-            margin_match += 1
-    
-    margin_pct = (margin_match / len(merged)) * 100 if len(merged) > 0 else 0
-    check(margin_pct == 100, f"cost_rollup margin_rate 100% match ({margin_pct:.1f}%)")
+# ===== SECTION 4: EXPLODED REQUIREMENTS — T2, T6 =====
+
+if not er.empty and "component_id" in er.columns and "contract_discount" in er.columns:
+    er_disc = er.drop_duplicates("component_id").set_index("component_id")
+
+    # T2: absent supplier+category → discount must be 0.0
+    T2_CHECKS = ["CMP00001", "MAT00011", "RAW00030", "CMP00045", "MAT00047"]
+    for cid in T2_CHECKS:
+        if cid in er_disc.index:
+            got = float(er_disc.loc[cid, "contract_discount"])
+            if abs(got) > 1e-9:
+                err("T2", f"{cid} contract_discount={got:.4f}, expected 0.0 (missing supplier+category key)")
+
+    # T6: expired contract — CMP00016 (ELECTRICAL/SUP005, expired 2024-05-31)
+    if "CMP00016" in er_disc.index:
+        got = float(er_disc.loc["CMP00016", "contract_discount"])
+        if abs(got) > 1e-9:
+            err("T6", f"CMP00016 contract_discount={got:.4f}, expected 0.0 (contract expired 2024-05-31)")
+    else:
+        err("T6", "CMP00016 missing from exploded_requirements (needed for T6 expired-contract check)")
+
+    # T6: future contract — PRT00024 (HYDRAULIC/SUP001, effective_from 2024-07-01)
+    if "PRT00024" in er_disc.index:
+        got = float(er_disc.loc["PRT00024", "contract_discount"])
+        if abs(got) > 1e-9:
+            err("T6", f"PRT00024 contract_discount={got:.4f}, expected 0.0 (contract not yet active 2024-07-01)")
+    else:
+        err("T6", "PRT00024 missing from exploded_requirements (needed for T6 future-contract check)")
+
+    # T6: active contracts must be applied
+    ACTIVE_DISC = {
+        "MAT00007": 0.07,   # STRUCTURAL/SUP008, active full year
+        "PRT00006": 0.06,   # STRUCTURAL/SUP003, active
+        "PRT00032": 0.09,   # HYDRAULIC/SUP009, active
+        "PRT00043": 0.12,   # AVIONICS/SUP008, active
+        "MAT00040": 0.09,   # AVIONICS/SUP005, active (not the expired STRUCTURAL or ELECTRICAL ones)
+    }
+    for cid, expected_disc in ACTIVE_DISC.items():
+        if cid in er_disc.index:
+            got = float(er_disc.loc[cid, "contract_discount"])
+            if not near(got, expected_disc, 0.001):
+                err("T6", f"{cid} contract_discount={got:.4f}, expected {expected_disc} (active contract)")
+
+    # Math consistency: discounted_unit_price = unit_price * (1 - discount)
+    if "unit_price" in er.columns and "discounted_unit_price" in er.columns:
+        sample = er.sample(min(20, len(er)), random_state=7)
+        for _, row in sample.iterrows():
+            up   = float(row["unit_price"])
+            disc = float(row["contract_discount"])
+            dup  = float(row["discounted_unit_price"])
+            expected = up * (1 - disc)
+            if not near(dup, expected, 0.02):
+                err("T3", f"{row['component_id']}: discounted_unit_price={dup:.4f}, "
+                          f"expected unit_price*(1-discount)={expected:.4f}")
+
+    # All net_qty_required >= 0
+    if "net_qty_required" in er.columns:
+        neg = er[er["net_qty_required"] < -1e-6]
+        if len(neg):
+            err("ER", f"{len(neg)} rows with negative net_qty_required")
+
+    # contract_discount in valid range
+    if "contract_discount" in er.columns:
+        bad = er[(er["contract_discount"] < 0) | (er["contract_discount"] > 0.5)]
+        if len(bad):
+            err("ER", f"{len(bad)} rows with contract_discount outside [0, 0.5]")
 
 
-def verify_cross_file_consistency(exploded_df, shortages_df, po_df, cost_df):
-    if exploded_df is None or shortages_df is None:
-        return
-    
-    shortage_comps = set(shortages_df["component_id"])
-    exploded_comps = set(exploded_df["component_id"])
-    check(shortage_comps.issubset(exploded_comps), 
-          "material_shortages components are subset of exploded_requirements")
-    
-    total_short_qty = shortages_df["net_shortage"].sum()
-    check(total_short_qty > 0, f"material_shortages has positive net_shortage sum ({total_short_qty:.0f})")
-    
-    if po_df is not None and cost_df is not None:
-        total_po_value = po_df["total_value"].sum()
-        total_cost = cost_df["extended_total"].sum()
-        check(total_po_value > 0, f"purchase_orders has positive total_value ({total_po_value:.2f})")
-        check(total_cost > 0, f"cost_rollup has positive extended_total ({total_cost:.2f})")
+# ===== SECTION 5: MATERIAL SHORTAGES — T1 =====
+
+if not sh.empty and "component_id" in sh.columns and "shortage_covered" in sh.columns:
+
+    # T1: all covered FASTENER components have shortage_covered = YES
+    sh_idx = sh.set_index(["assembly_id","component_id"]) if "assembly_id" in sh.columns else None
+    sh_comp_covered = sh.groupby("component_id")["shortage_covered"].first()
+
+    for fc in FASTENER_COVERED:
+        if fc in sh_comp_covered.index:
+            if sh_comp_covered[fc] != "YES":
+                err("T1", f"{fc} (covered FASTENER) has shortage_covered={sh_comp_covered[fc]}, expected YES")
+        else:
+            # covered FASTENER should appear in shortages since on_hand=0
+            err("T1", f"{fc} (covered FASTENER, on_hand=0) absent from material_shortages")
+
+    # shortage_covered values must be YES or NO
+    valid_covered = sh["shortage_covered"].isin(["YES","NO"])
+    if not valid_covered.all():
+        err("SH", f"{(~valid_covered).sum()} rows have invalid shortage_covered value")
+
+    # shortage_severity values must be CRITICAL or STANDARD
+    if "shortage_severity" in sh.columns:
+        valid_sev = sh["shortage_severity"].isin(["CRITICAL","STANDARD"])
+        if not valid_sev.all():
+            err("SH", f"{(~valid_sev).sum()} rows have invalid shortage_severity value")
+
+    # All net_qty_required > 0 (shortages file should only contain actual shortages)
+    if "net_qty_required" in sh.columns:
+        non_pos = sh[sh["net_qty_required"] <= 0]
+        if len(non_pos):
+            err("SH", f"{len(non_pos)} rows with net_qty_required <= 0 in material_shortages")
+
+    # at least some rows are covered
+    n_covered = sh["shortage_covered"].eq("YES").sum()
+    if n_covered < 5:
+        err("T1", f"Only {n_covered} shortages marked as covered; expected >= 8 (FASTENER substitutes)")
+
+    # available_substitute_qty must be >= 0
+    if "available_substitute_qty" in sh.columns:
+        neg = sh[sh["available_substitute_qty"] < 0]
+        if len(neg):
+            err("SH", f"{len(neg)} rows with negative available_substitute_qty")
 
 
-def verify_bom_explosion_logic(golden_exploded):
-    check(len(golden_exploded) > 30, f"Sufficient component explosion ({len(golden_exploded)} > 30)")
-    
-    multi_parent = golden_exploded[golden_exploded["num_parent_assemblies"] > 1]
-    check(len(multi_parent) > 5, f"BOM has shared components ({len(multi_parent)} > 5)")
-    
-    multi_level = golden_exploded[golden_exploded["deepest_level"] > 2]
-    check(len(multi_level) > 3, f"BOM has deep levels ({len(multi_level)} > 3)")
-    
-    categories = golden_exploded["category"].nunique()
-    check(categories >= 3, f"Multiple component categories ({categories} >= 3)")
+# ===== SECTION 6: PURCHASE ORDERS — T1, T3, T4, T7 =====
+
+if not po.empty and "component_id" in po.columns:
+
+    # T1: no covered FASTENER IDs in purchase_orders
+    if "component_id" in po.columns:
+        fc_in_po = set(po["component_id"]) & FASTENER_COVERED
+        if fc_in_po:
+            err("T1", f"Covered FASTENER components found in purchase_orders (should be substituted): {fc_in_po}")
+
+    # Build useful indices
+    po_sup = po.set_index(["assembly_id","component_id"]) if "assembly_id" in po.columns else po
+
+    # T7: expedite_fee = min(po_value * 0.03, max_expedite_fee)
+    if all(c in po.columns for c in ["supplier_id","po_value","expedite_fee"]):
+        for _, row in po.iterrows():
+            sup = row["supplier_id"]
+            pv  = float(row["po_value"])
+            fee = float(row["expedite_fee"])
+            if sup in exp.index:
+                pct     = float(exp.loc[sup, "expedite_pct"])
+                max_fee = float(exp.loc[sup, "max_expedite_fee"])
+                expected = min(pv * pct, max_fee)
+                if not near(fee, expected, 0.01):
+                    err("T7", f"{row['component_id']} expedite_fee={fee:.4f}, expected min({pv}*{pct},{max_fee})={expected:.4f}")
+
+        # At least some rows should be capped (sanity check data coverage)
+        n_capped = sum(
+            1 for _, row in po.iterrows()
+            if row["supplier_id"] in exp.index and
+               float(row["po_value"]) * float(exp.loc[row["supplier_id"], "expedite_pct"]) > float(exp.loc[row["supplier_id"], "max_expedite_fee"])
+        )
+        if n_capped == 0:
+            err("T7", "No capped expedite fees found; expected at least 1 (e.g. RAW00048/SUP001)")
+
+    # T4: adjusted_lead_time = ceil(base_lead_time * (1 + 0.1 * consecutive_late_count))
+    if all(c in po.columns for c in ["base_lead_time","consecutive_late_count","adjusted_lead_time"]):
+        for _, row in po.iterrows():
+            base    = float(row["base_lead_time"])
+            consec  = int(row["consecutive_late_count"])
+            adj     = int(row["adjusted_lead_time"])
+            expected = math.ceil(base * (1.0 + 0.1 * consec))
+            if adj != expected:
+                err("T4", f"{row['component_id']} adjusted_lead_time={adj}, expected ceil({base}*(1+0.1*{consec}))={expected}")
+
+    # T4: reliability_adjusted = YES when consecutive_late_count > 0
+    if all(c in po.columns for c in ["consecutive_late_count","reliability_adjusted"]):
+        mismatch = po[
+            (po["consecutive_late_count"] > 0) & (po["reliability_adjusted"] != "YES") |
+            (po["consecutive_late_count"] == 0) & (po["reliability_adjusted"] != "NO")
+        ]
+        if len(mismatch):
+            err("T4", f"{len(mismatch)} rows with inconsistent reliability_adjusted vs consecutive_late_count")
+
+    # T3: po_value = qty_ordered * unit_price
+    if all(c in po.columns for c in ["qty_ordered","unit_price","po_value"]):
+        for _, row in po.iterrows():
+            expected_pv = float(row["qty_ordered"]) * float(row["unit_price"])
+            if not near(float(row["po_value"]), expected_pv, 0.01):
+                err("T3", f"{row['component_id']} po_value={row['po_value']:.4f}, expected qty*price={expected_pv:.4f}")
+
+    # T3: for each PO, the unit_price should be plausible (positive)
+    if "unit_price" in po.columns:
+        bad = po[po["unit_price"] <= 0]
+        if len(bad):
+            err("T3", f"{len(bad)} PO rows with unit_price <= 0")
+
+    # Cross-check: POs only for uncovered shortages
+    if not sh.empty and "shortage_covered" in sh.columns and "assembly_id" in sh.columns:
+        covered_pairs = set(
+            zip(sh[sh["shortage_covered"]=="YES"]["assembly_id"],
+                sh[sh["shortage_covered"]=="YES"]["component_id"])
+        )
+        if "assembly_id" in po.columns:
+            po_pairs = set(zip(po["assembly_id"], po["component_id"]))
+            bad_pairs = po_pairs & covered_pairs
+            if bad_pairs:
+                err("T1", f"POs exist for shortage-covered pairs: {list(bad_pairs)[:5]}")
 
 
-def main():
-    base_dir = Path(__file__).parent
-    task_dir = base_dir.parent / "task"
-    
-    golden_exploded = load_csv(base_dir / "golden_exploded_requirements.csv", "golden_exploded_requirements")
-    golden_shortages = load_csv(base_dir / "golden_material_shortages.csv", "golden_material_shortages")
-    golden_po = load_csv(base_dir / "golden_purchase_orders.csv", "golden_purchase_orders")
-    golden_critical = load_csv(base_dir / "golden_critical_path_analysis.csv", "golden_critical_path_analysis")
-    golden_cost = load_csv(base_dir / "golden_cost_rollup.csv", "golden_cost_rollup")
-    
-    student_exploded = load_csv(task_dir / "exploded_requirements.csv", "exploded_requirements")
-    student_shortages = load_csv(task_dir / "material_shortages.csv", "material_shortages")
-    student_po = load_csv(task_dir / "purchase_orders.csv", "purchase_orders")
-    student_critical = load_csv(task_dir / "critical_path_analysis.csv", "critical_path_analysis")
-    student_cost = load_csv(task_dir / "cost_rollup.csv", "cost_rollup")
-    
-    if golden_exploded is not None:
-        verify_bom_explosion_logic(golden_exploded)
-    
-    verify_exploded_requirements(student_exploded, golden_exploded)
-    
-    if golden_exploded is not None:
-        verify_material_shortages(student_shortages, golden_shortages, golden_exploded)
-    
-    verify_purchase_orders(student_po, golden_po)
-    verify_critical_path(student_critical, golden_critical)
-    verify_cost_rollup(student_cost, golden_cost)
-    
-    verify_cross_file_consistency(student_exploded, student_shortages, student_po, student_cost)
-    
-    print(f"{PASS}/{PASS+FAIL}")
-    
-    return 0 if FAIL == 0 else 1
+# ===== SECTION 7: COST ROLLUP — T5 =====
+
+if not cr.empty and "assembly_id" in cr.columns and "capacity_multiplier" in cr.columns:
+    cr_idx = cr.set_index("assembly_id")
+
+    # T5: capacity multiplier — exact priority match, then "ALL" fallback
+    T5_CAP = {
+        "ASM0001": 0.85,   # CRITICAL / 2024-07 → exact CRITICAL row
+        "ASM0002": 0.95,   # HIGH     / 2024-08 → falls back to ALL=0.95
+        "ASM0003": 1.15,   # STANDARD / 2024-09 → exact STANDARD row
+        "ASM0009": 0.80,   # CRITICAL / 2024-09 → exact CRITICAL row
+        "ASM0010": 1.00,   # HIGH     / 2024-09 → no exact or ALL row → default 1.0
+        "ASM0004": 1.05,   # LOW      / 2024-10 → ALL row
+        "ASM0008": 1.00,   # LOW      / 2024-07 → no ALL for Jul, no exact LOW → default 1.0
+        "ASM0006": 0.90,   # HIGH     / 2024-11 → ALL row
+    }
+    for asm_id, expected_cap in T5_CAP.items():
+        if asm_id in cr_idx.index:
+            got = float(cr_idx.loc[asm_id, "capacity_multiplier"])
+            if not near(got, expected_cap, 0.001):
+                err("T5", f"{asm_id} capacity_multiplier={got:.4f}, expected {expected_cap}")
+        else:
+            err("T5", f"{asm_id} missing from cost_rollup (needed for T5 check)")
+
+    # effective_material_cost = discounted_material_cost * capacity_multiplier
+    if all(c in cr.columns for c in ["discounted_material_cost","capacity_multiplier","effective_material_cost"]):
+        for _, row in cr.iterrows():
+            expected_eff = float(row["discounted_material_cost"]) * float(row["capacity_multiplier"])
+            if not near(float(row["effective_material_cost"]), expected_eff, 0.02):
+                err("T5", f"{row['assembly_id']} effective_material_cost={row['effective_material_cost']:.4f}, "
+                          f"expected disc_mat*cap={expected_eff:.4f}")
+
+    # total_cost = effective_material_cost + labor_cost
+    if all(c in cr.columns for c in ["effective_material_cost","labor_cost","total_cost"]):
+        for _, row in cr.iterrows():
+            expected = float(row["effective_material_cost"]) + float(row["labor_cost"])
+            if not near(float(row["total_cost"]), expected, 0.02):
+                err("T5", f"{row['assembly_id']} total_cost={row['total_cost']:.4f}, "
+                          f"expected eff_mat+labor={expected:.4f}")
+
+    # material_cost > discounted_material_cost when any discount present
+    if all(c in cr.columns for c in ["material_cost","discounted_material_cost"]):
+        tot_mat  = cr["material_cost"].sum()
+        tot_disc = cr["discounted_material_cost"].sum()
+        if tot_disc >= tot_mat:
+            err("ER", f"Sum discounted_material_cost ({tot_disc:.2f}) >= material_cost ({tot_mat:.2f}); "
+                      f"some discounts must be applied")
+
+    # all costs positive
+    for col in ["material_cost","labor_cost","total_cost"]:
+        if col in cr.columns:
+            nonpos = cr[cr[col] <= 0]
+            if len(nonpos):
+                err("CR", f"{len(nonpos)} rows with {col} <= 0")
+
+    # Spot-check specific total_cost values from golden
+    GOLDEN_TOTALS = {
+        "ASM0001": 36375.86,
+        "ASM0002": 139724.96,
+        "ASM0003": 90677.90,
+        "ASM0009": 86287.42,
+    }
+    for asm_id, expected_total in GOLDEN_TOTALS.items():
+        if asm_id in cr_idx.index:
+            got = float(cr_idx.loc[asm_id, "total_cost"])
+            if not near(got, expected_total, 0.03):  # 3% tolerance
+                err("CR", f"{asm_id} total_cost={got:.2f}, expected ~{expected_total:.2f}")
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# ===== SECTION 8: CROSS-FILE CONSISTENCY — T3 =====
+
+if not er.empty and not sh.empty:
+    # Every assembly in shortages should be in exploded_requirements
+    if "assembly_id" in sh.columns and "assembly_id" in er.columns:
+        sh_asms = set(sh["assembly_id"])
+        er_asms = set(er["assembly_id"])
+        orphan = sh_asms - er_asms
+        if orphan:
+            err("T3", f"Assemblies in shortages but not in exploded_requirements: {orphan}")
+
+if not er.empty and not po.empty:
+    # Every component in POs should appear in exploded_requirements
+    if "component_id" in er.columns and "component_id" in po.columns:
+        po_comps = set(po["component_id"])
+        er_comps = set(er["component_id"])
+        orphan = po_comps - er_comps
+        if orphan:
+            err("T3", f"Components in purchase_orders absent from exploded_requirements: {orphan}")
+
+    # unit_price in exploded_requirements vs purchase_orders: when same (asm, comp), prices may differ
+    # due to different tier (PO uses qty_ordered, ER uses gross_qty). It's OK if they differ.
+    # What we check: the discount fraction is consistent if same component
+    if all(c in er.columns for c in ["component_id","contract_discount"]) and \
+       all(c in po.columns for c in ["component_id","consecutive_late_count"]):
+        er_disc_map = er.drop_duplicates("component_id").set_index("component_id")["contract_discount"]
+        # This consistency is checked per component — no conflicting discounts across assemblies
+        er_per_component = er.groupby("component_id")["contract_discount"].nunique()
+        multi_disc = er_per_component[er_per_component > 1]
+        if len(multi_disc):
+            err("T3", f"Components with inconsistent contract_discount across assemblies: {list(multi_disc.index)[:5]}")
+
+# ===== SUMMARY =====
+
+total = 120  # declared check points (actual checks may be >, due to loops)
+n_errors = len(errors)
+
+print(f"\n{'='*60}")
+print(f"AerospaceBOMExplosion V2 — Verifier Results")
+print(f"{'='*60}")
+if errors:
+    for e in errors:
+        print(f"  FAIL  {e}")
+else:
+    print("  All checks passed.")
+print(f"{'='*60}")
+print(f"Reasoning errors: {n_errors}")
+print(f"Result: {'PASS' if n_errors == 0 else 'FAIL'}")
+sys.exit(0 if n_errors == 0 else 1)
